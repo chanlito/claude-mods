@@ -20,9 +20,20 @@ import {
   type Result,
 } from "./record";
 
-/** A thumbnail's box: pixels for the blocks, cells for a sharp picture. */
-const THUMB_WIDTH = 44;
-const THUMB_HEIGHT = 28;
+/** A picture's width in cells: the narrowest, the widest, and its height box per cell across (blocks are 2 pixels tall). */
+const MIN_THUMB_WIDTH = 44;
+const MAX_THUMB_WIDTH = 80;
+const THUMB_ASPECT = 28 / 44;
+
+/**
+ * As wide as two pictures side by side fit the transcript (a change's before
+ * and after), between the narrowest and the widest: 8 cells go to the two
+ * indents and the gap between them.
+ */
+function thumbWidthFor(columns: number | undefined): number {
+  if (!columns) return MIN_THUMB_WIDTH;
+  return Math.max(MIN_THUMB_WIDTH, Math.min(MAX_THUMB_WIDTH, Math.floor((columns - 8) / 2)));
+}
 /** How long a scan of the records folder is reused before it is read again. */
 const INDEX_TTL_MS = 10_000;
 /** How many records one reply shows a button for. */
@@ -262,21 +273,21 @@ async function act(
 
 const thumbs = new Map<string, Promise<Thumb>>();
 
-async function makeThumb($: EngineInterface, path: string, mode: Mode): Promise<Thumb> {
+async function makeThumb($: EngineInterface, path: string, mode: Mode, width: number): Promise<Thumb> {
   const format = FORMATS[path.split(".").at(-1)?.toLowerCase() ?? ""];
   if (!path.startsWith("/") || !format) return {};
   try {
     const { exitCode, stdout } = await $.process.run(
-      ["sh", "-c", THUMB_SCRIPT, "sh", path, String(THUMB_WIDTH), String(THUMB_HEIGHT), format, mode],
+      ["sh", "-c", THUMB_SCRIPT, "sh", path, String(width), String(Math.round(width * THUMB_ASPECT)), format, mode],
       { timeoutMs: 15_000 },
     );
     if (exitCode !== 0) return {};
     const [size = "", picture = ""] = stdout.split("\n");
-    const [width, height] = size.trim().split(/[ x]/).map(Number);
+    const [sourceWidth, sourceHeight] = size.trim().split(/[ x]/).map(Number);
     const data = picture.trim();
     return {
-      width: width || undefined,
-      height: height || undefined,
+      width: sourceWidth || undefined,
+      height: sourceHeight || undefined,
       // A non-PNG source makes the engine refuse the whole reply's drawing.
       ...(data && mode === "image" && data.startsWith(PNG_BASE64) ? { png: data } : {}),
       ...(data && mode === "blocks" ? { preview: decodePreview(fromBase64(data)) } : {}),
@@ -286,11 +297,11 @@ async function makeThumb($: EngineInterface, path: string, mode: Mode): Promise<
   }
 }
 
-function thumb($: EngineInterface, path: string, mode: Mode): Promise<Thumb> {
-  const key = `${mode}:${path}`;
+function thumb($: EngineInterface, path: string, mode: Mode, width: number): Promise<Thumb> {
+  const key = `${mode}:${width}:${path}`;
   let made = thumbs.get(key);
   if (!made) {
-    made = makeThumb($, path, mode);
+    made = makeThumb($, path, mode, width);
     thumbs.set(key, made);
   }
   return made;
@@ -372,23 +383,24 @@ async function picture(
   path: string,
   within: string,
   mode: Mode,
+  width: number,
 ) {
   const { Box, Text, Button } = $.ui.resolve(e);
   const terminal = e.surface === "terminal" ? $.ui.resolve(e) : undefined;
   const Image = terminal?.Image;
   const Raster = terminal?.Raster;
-  const t: Thumb = terminal ? await thumb($, path, mode) : {};
+  const t: Thumb = terminal ? await thumb($, path, mode, width) : {};
   const rows =
     t.width && t.height
-      ? Math.max(1, Math.min(24, Math.round((THUMB_WIDTH * t.height) / t.width / 2)))
+      ? Math.max(1, Math.min(Math.round(width * THUMB_ASPECT), Math.round((width * t.height) / t.width / 2)))
       : 0;
   return (
-    <Box key={`pic-${key}`} flexDirection="column" width={THUMB_WIDTH}>
+    <Box key={`pic-${key}`} flexDirection="column" width={width}>
       {Image && t.png && rows > 0 && (
         <Image
           key={`img-${key}`}
           source={{ png: t.png }}
-          columns={THUMB_WIDTH}
+          columns={width}
           rows={rows}
           alt={label}
         />
@@ -415,14 +427,15 @@ async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: s
   const counts = { pass: 0, fail: 0, skip: r.notChecked.length };
   for (const c of r.checks) counts[c.result]++;
 
+  const width = thumbWidthFor(e.viewport?.columns);
   const changes = [];
   for (const [i, c] of r.changes.entries()) {
     const sides = [];
     if (c.before)
-      sides.push(await picture($, e, `${id}-c${i}-before`, "Before", `${r.dir}/${c.before}`, r.dir, mode));
+      sides.push(await picture($, e, `${id}-c${i}-before`, "Before", `${r.dir}/${c.before}`, r.dir, mode, width));
     else sides.push(<Text key={`${id}-c${i}-nobefore`} dimColor>(no before shot)</Text>);
     if (c.after)
-      sides.push(await picture($, e, `${id}-c${i}-after`, "After", `${r.dir}/${c.after}`, r.dir, mode));
+      sides.push(await picture($, e, `${id}-c${i}-after`, "After", `${r.dir}/${c.after}`, r.dir, mode, width));
     changes.push(
       <Box key={`${id}-c${i}`} flexDirection="column">
         <Text bold>{c.title}</Text>
