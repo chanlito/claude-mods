@@ -165,6 +165,16 @@ export function outputText(tool: string, output: unknown): string {
   return typeof stdout === "string" ? stdout : "";
 }
 
+/**
+ * What a `gh pr create` call printed, its new PR's URL among it; "" for any
+ * other call, so a `gh pr edit` or `gh pr view` row draws no button of its own.
+ */
+export function createdText(tool: string, input: unknown, output: unknown): string {
+  const command = (input as { command?: unknown } | null)?.command;
+  if (typeof command !== "string" || !/\bgh\s+pr\s+create\b/.test(command)) return "";
+  return outputText(tool, output);
+}
+
 /** `name#541`, the form the session's list of seen PRs keeps. */
 export const refKey = (r: Ref) => `${r.name ?? ""}#${r.pr}`;
 

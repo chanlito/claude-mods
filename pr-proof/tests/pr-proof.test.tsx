@@ -404,3 +404,36 @@ test("/proof lists this session's PRs first: one it created, one whose record it
   expect(text).toMatch(/^This session:\nshop-web#541 .*\napi#12 [^\n]*$/);
   expect(text).not.toMatch(/Other sessions/);
 });
+
+test("a gh pr edit row prints the PR's URL too, and gets no button", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: "tu-edit",
+    props: { ...created("tu-edit"), input: { command: "gh pr edit 541 --body-file b.md" } },
+  });
+  expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+});
+
+test("only the newest mention of a PR draws its button", async ($, on) => {
+  stage($, on, {});
+  const mount = (requestId: string, text: string) =>
+    $.ui.mount({
+      plugin: "pr-proof",
+      surface: "terminal",
+      component: "AssistantMessage",
+      requestId,
+      props: { text, isFirstOfReply: true },
+    });
+  const first = await mount("m-1", "web#541 is ready for review.");
+  expect(await first.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  const second = await mount("m-2", "The list in web#541 now reads សំណង់.");
+  expect(await second.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  expect(await first.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+  // The older reply redrawn does not take the button back.
+  expect(await first.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+  expect(await second.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+});
