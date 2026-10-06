@@ -1,4 +1,7 @@
+import { atom, read, update } from "claude-code";
 import type { EngineInterface, Register } from "claude-code";
+
+import type { Dots } from "../types";
 
 import {
   applyOverrides,
@@ -22,7 +25,7 @@ import {
   type Step,
 } from "./stack";
 
-/** How often the status line looks again. */
+/** How often the hint line's dots look again. */
 const REFRESH_MS = 30_000;
 const TOOL = "dev_up";
 
@@ -176,6 +179,27 @@ async function checkoutOf($: EngineInterface, dir: string): Promise<{ top: strin
 }
 const logOf = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.log`;
 const pidOf = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.pid`;
+
+const dots = atom({ plugin: "dev-up", key: "dots" } as const, null);
+
+/** Saves what the hint line draws; written only when it changed, so an idle refresh redraws nothing. */
+async function show($: EngineInterface, stack: Stack | undefined, seen: Observed = {}) {
+  const next: Dots = stack
+    ? {
+        stack: stack.name,
+        services: stack.services.map((s) => ({
+          name: s.name,
+          state: seen[s.name]?.state ?? "down",
+          ...(s.servedFrom ? { from: s.servedFrom } : {}),
+        })),
+      }
+    : null;
+  if (JSON.stringify(await read($, dots)) === JSON.stringify(next)) return;
+  await update($, dots, () => next);
+}
+
+const COLOR = { up: "success", starting: "warning", broken: "error" } as const;
+const GLYPH = { up: "●", starting: "◐", down: "○", broken: "✕" } as const;
 
 /** What each check script last said, by `<stack>/<service>`; scripts run only on a pass. */
 const checks = new Map<string, Seen>();
@@ -360,12 +384,12 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
   if (verb === "" || verb === "up" || verb === "--dry-run" || verb === "dry-run") {
     const dryRun = verb !== "" && verb !== "up";
     const { lines, seen } = await pass($, stack, dryRun);
-    if (!dryRun) $.ui.status(statusLine(stack, seen));
+    if (!dryRun) await show($, stack, seen);
     return [...lines, "", statusLine(stack, seen)].join("\n") + broken;
   }
   if (verb === "status") {
     const seen = await observe($, stack);
-    $.ui.status(statusLine(stack, seen));
+    await show($, stack, seen);
     return stack.services
       .map(
         (s) =>
@@ -450,7 +474,7 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
       seen[s.name] = { state: "starting" };
     }
     if (!lines.length) lines.push(verb === "use" ? "Already served from there." : "Nothing was moved.");
-    $.ui.status(statusLine(after, seen));
+    await show($, after, seen);
     return [...lines, "", statusLine(after, seen)].join("\n");
   }
   if (verb === "restart") {
@@ -484,7 +508,7 @@ async function refresh($: EngineInterface, folderSetting: string) {
   refreshing = true;
   try {
     const { stack } = await findStack($, folderSetting);
-    $.ui.status(stack ? statusLine(stack, await observe($, stack)) : undefined);
+    await show($, stack, stack ? await observe($, stack) : {});
   } finally {
     refreshing = false;
   }
@@ -505,7 +529,7 @@ export const register: Register = (on, options) => {
       });
     } catch (error) {
       commandTaken = true;
-      $.ui.log(`dev-up: /dev-up is taken (${error instanceof Error ? error.message : String(error)}); the dev_up tool and the status line still work`);
+      $.ui.log(`dev-up: /dev-up is taken (${error instanceof Error ? error.message : String(error)}); the dev_up tool and the dots under the prompt still work`);
     }
     await $.tool.register({
       name: TOOL,
@@ -530,6 +554,32 @@ export const register: Register = (on, options) => {
     void refresh($, folderSetting);
     $.clock.every(REFRESH_MS, () => void refresh($, folderSetting));
     return next(e);
+  });
+
+  // The stack's dots, colored, at the end of the hint line under the prompt.
+  on("ui.render", { component: "PromptHint" }, async ($, e, next) => {
+    const d = await read($, dots);
+    if (!d) return next(e);
+    const own = await next(e);
+    const { Box, Text } = $.ui.resolve(e);
+    return (
+      <Box flexDirection="row" gap={2}>
+        {own}
+        <Box key="dev-up" flexDirection="row" gap={1}>
+          <Text dimColor>{d.stack}</Text>
+          {d.services.map((s) => (
+            <Box key={`dev-up-${s.name}`} flexDirection="row">
+              {s.state === "down" ? <Text dimColor>{GLYPH.down}</Text> : <Text color={COLOR[s.state]}>{GLYPH[s.state]}</Text>}
+              <Text dimColor>
+                {" "}
+                {s.name}
+                {s.from ? `@${s.from}` : ""}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+    );
   });
 
   on("command.run", { command: "dev-up" }, async ($, e, next) =>

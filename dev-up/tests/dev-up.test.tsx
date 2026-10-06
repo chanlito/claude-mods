@@ -206,7 +206,6 @@ function stage(
   mock.env(on, { HOME });
   mock.clock(on);
   const ran: { argv: string[]; cwd?: string }[] = [];
-  const statuses: (string | undefined)[] = [];
   const files = new Set([`${STACKS}/shop.yml`, ...(machine.files ?? [])]);
   const written = new Map<string, string>();
   const gitIn: string[] = [];
@@ -245,11 +244,11 @@ function stage(
     if (cmd === `${STACKS}/shop/seed.sh`) return answer(0, "UP      seeded\nrows 12\n");
     return answer(0, "");
   });
-  on("ui.status", (_$, e) => {
-    statuses.push(e.text);
-    return { value: undefined };
+  on("ui.render", ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return <Text>? for shortcuts</Text>;
   });
-  return { ran, statuses, written, gitIn };
+  return { ran, written, gitIn };
 }
 
 const HEALTHY = [
@@ -270,7 +269,7 @@ test("/dev-up with Docker down starts the containers in the root and nothing els
 });
 
 test("/dev-up with the containers healthy starts the servers detached, with a log and a pid file", async ($, on) => {
-  const { ran, statuses } = stage(on, { compose: HEALTHY, files: [`${ROOT}/web/node_modules`] });
+  const { ran } = stage(on, { compose: HEALTHY, files: [`${ROOT}/web/node_modules`] });
   const out = await devUp($);
   const starts = ran.filter((r) => r.argv[2]?.includes("setsid"));
   expect(starts.map((r) => r.argv.slice(4))).toEqual([
@@ -280,7 +279,7 @@ test("/dev-up with the containers healthy starts the servers detached, with a lo
   expect(out.text).toMatch(/^UP {6}db: postgres healthy, mail up/m);
   expect(out.text).toMatch(/^STARTED web: pnpm dev {2}\(log .*web\.log\)/m);
   expect(out.text).toMatch(/^report {2}web 200/m);
-  expect(statuses.at(-1)).toBe("shop  ● db  ◐ web  ○ codegen  ◐ worker  ○ seed");
+  expect(out.text).toMatch(/^shop {2}● db {2}◐ web {2}○ codegen {2}◐ worker {2}○ seed$/m);
 });
 
 test("with the server answering, the next pass runs the task and the check script and relays its lines", async ($, on) => {
@@ -419,4 +418,42 @@ test("a worktree that was removed drops out of the overrides", async ($, on) => 
   await devUp($, `use ${WT}`);
   written.set(`${HOME}/.cache/dev-up/shop/use.json`, JSON.stringify({ web: "/gone/web" }));
   expect((await devUp($, "status")).text).not.toMatch(/from \/gone/);
+});
+
+/* ---- the hint line ---- */
+
+const hint = ($: Engine, surface: "terminal" | "desktop") =>
+  $.ui.mount({
+    plugin: "dev-up",
+    surface,
+    component: "PromptHint",
+    requestId: "hint",
+    props: { isDraft: false, isWorking: false, hint: "? for shortcuts" },
+  });
+
+for (const surface of ["terminal", "desktop"] as const) {
+  test(`on ${surface}, the hint line keeps its own text and adds the stack's dots in color`, async ($, on) => {
+    stage(on, {
+      compose: HEALTHY,
+      ports: [3000],
+      pids: ["PID web alive", "PID worker dead"],
+      files: [`${ROOT}/web/node_modules`],
+    });
+    await devUp($, "status");
+    const ui = await hint($, surface);
+    expect(await ui.find({ type: "Text", text: "? for shortcuts" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "shop" })).toBeDefined();
+    expect(await ui.find({ key: "dev-up-db" })).toBeDefined();
+    expect((await ui.find({ type: "Text", text: "●" }))?.props).toMatchObject({ color: "success" });
+    expect((await ui.find({ type: "Text", text: "✕" }))?.props).toMatchObject({ color: "error" });
+    expect((await ui.find({ type: "Text", text: "○" }))?.props).toMatchObject({ dimColor: true });
+  });
+}
+
+test("with no stack for the folder, the hint line is left alone", async ($, on) => {
+  stage(on, { compose: "", cwd: "/tmp/elsewhere" });
+  await devUp($, "status");
+  const ui = await hint($, "terminal");
+  expect(await ui.find({ type: "Text", text: "? for shortcuts" })).toBeDefined();
+  expect(await ui.find({ key: "dev-up" })).toBe(undefined);
 });

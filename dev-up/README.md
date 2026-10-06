@@ -19,7 +19,9 @@ Running it again is both the health check and the way to finish.
 Servers start detached (`setsid`), with a log and a pid file under
 `~/.cache/dev-up/<stack>/`. They outlive the turn, the Claude session and a
 reload of the mod, and every session in the stack's folder sees the same ones.
-The stack's state shows in the status line and is refreshed every 30 seconds.
+The stack's state shows at the end of the hint line under the prompt, one
+colored dot per service: green up, yellow starting, red broken, dim down. It is
+refreshed every 30 seconds.
 
 ## Installation
 
@@ -140,7 +142,7 @@ until `/dev-up restore`. A server that waits on something not up yet starts on
 the next pass instead. Containers and check scripts stay where they are.
 
 There is one port per server, so a move applies to every session, not just
-yours. The status line shows it: `web@feat` means `web` is served from the
+yours. The hint line shows it: `web@feat` means `web` is served from the
 `feat` worktree. If the worktree is removed, its services go back to their own
 folders on the next pass.
 
@@ -198,7 +200,7 @@ Not on the same port. `use` moves a server for everyone, so one session's move
 replaces another's. Run one branch at a time, or give the second checkout its
 own stack file with other ports.
 
-**When does the status line update?**
+**When do the dots update?**
 Every 30 seconds, and after each `/dev-up` or `dev_up` call. Check scripts run
 only during a pass, so a check service shows what it said last time.
 

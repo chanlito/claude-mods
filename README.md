@@ -5,7 +5,7 @@ also a plugin marketplace: `.claude-plugin/marketplace.json` lists every mod.
 
 | Mod | What it does |
 | --- | --- |
-| [dev-up](./dev-up) | Brings up a folder's dev stack from `~/.claude/dev-stacks/<name>.yml` with `/dev-up`: docker compose, detached dev servers, one-off tasks and check scripts, one pass at a time, with the stack's state in the status line |
+| [dev-up](./dev-up) | Brings up a folder's dev stack from `~/.claude/dev-stacks/<name>.yml` with `/dev-up`: docker compose, detached dev servers, one-off tasks and check scripts, one pass at a time, with each service as a colored dot under the prompt |
 | [image-peek](./image-peek) | Previews pasted images and images Claude sends, with Open and Reveal (Explorer on WSL/Windows, Finder on macOS) buttons and `/reveal-image`, `/open-image` |
 | [pr-proof](./pr-proof) | Adds Reveal proof under a reply that names a PR: outlined before/after screenshots, the checks and what was not checked, from `~/pr-proof/<repo>/<pr>/proof.json`; ships the `record-proof` skill that writes it |
 
