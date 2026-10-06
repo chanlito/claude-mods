@@ -381,27 +381,6 @@ async function prState($: EngineInterface, slug: string, pr: number, whileWaitin
   return whileWaiting;
 }
 
-let remoteOwner: Promise<string | undefined> | undefined;
-
-/** The owner in this checkout's `origin` (github.com), a guess for a PR named without one. */
-async function ownerHere($: EngineInterface): Promise<string | undefined> {
-  remoteOwner ??= $.process
-    .run(["git", "remote", "get-url", "origin"])
-    .then((r) => (r.exitCode === 0 ? /github\.com[:/]([\w.-]+)\//.exec(r.stdout)?.[1] : undefined))
-    .catch(() => undefined);
-  return remoteOwner;
-}
-
-/** `owner/name` for a named PR: its own owner, a record's of that repo, else this checkout's. */
-async function slugOf($: EngineInterface, ref: Ref, records: ProofRecord[]): Promise<string | undefined> {
-  if (!ref.name) return undefined;
-  if (ref.owner) return `${ref.owner}/${ref.name}`;
-  const known = records.find((r) => r.repo?.split("/")[1] === ref.name || r.repoDir === ref.name)?.repo;
-  if (known?.includes("/")) return `${known.split("/")[0]}/${ref.name}`;
-  const owner = await ownerHere($);
-  return owner ? `${owner}/${ref.name}` : undefined;
-}
-
 let index: { at: number; root: string; records: Promise<ProofRecord[]> } | undefined;
 
 async function scan($: EngineInterface, root: string): Promise<ProofRecord[]> {
@@ -606,28 +585,15 @@ async function withProof(
   for (const r of named) {
     if (!r.repo?.includes("/") || (await prState($, r.repo, r.pr, "open")) !== "done") live.push(r);
   }
-  // An open PR named with no record: one warning line, so a missing proof shows
-  // as missing rather than as nothing. Bare #n is left out: it is as often an issue.
-  const missing: { slug: string; pr: number }[] = [];
-  for (const ref of refs) {
-    if (!ref.name || resolveRefs([ref], records, here).length > 0) continue;
-    const slug = await slugOf($, ref, records);
-    if (slug && !missing.some((m) => m.slug === slug && m.pr === ref.pr)) {
-      if ((await prState($, slug, ref.pr, "unknown")) === "open") missing.push({ slug, pr: ref.pr });
-    }
-  }
   const newestOnly = (id: string) => {
     const newest = newestMention(id, instance);
     displaced ||= newest.displaced;
     return newest.isNewest;
   };
   const found = live.filter((r) => newestOnly(r.dir)).slice(0, MAX_PER_REPLY);
-  const unproven = missing
-    .filter((m) => newestOnly(`missing:${m.slug}#${m.pr}`))
-    .slice(0, Math.max(0, MAX_PER_REPLY - found.length));
   // The rows that drew this record's button before draw again, without it.
   if (displaced) $.ui.invalidate("ui.render");
-  if (found.length === 0 && unproven.length === 0) return engineRow();
+  if (found.length === 0) return engineRow();
 
   const { Box, Text, Button } = $.ui.resolve(e);
   const own = await engineRow();
@@ -648,18 +614,9 @@ async function withProof(
         <Box flexDirection="row" gap={1}>
           <Button key={`${key}-toggle`} label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"} onPress={toggle} />
           {/* The row sits under the line that names the PR: its name only tells two buttons apart. */}
-          {found.length + unproven.length > 1 && <Text dimColor>{labelOf(r)}</Text>}
+          {found.length > 1 && <Text dimColor>{labelOf(r)}</Text>}
         </Box>
         {isOpen && (await details($, e, r, key, mode, toggle))}
-      </Box>,
-    );
-  }
-  for (const m of unproven) {
-    const name = m.slug.split("/")[1];
-    blocks.push(
-      <Box key={`pp-missing-${name}-${m.pr}`} flexDirection="row" gap={1} paddingLeft={2}>
-        <Text color="warning">! No proof recorded</Text>
-        {found.length + unproven.length > 1 && <Text dimColor>{`${name}#${m.pr}`}</Text>}
       </Box>,
     );
   }
