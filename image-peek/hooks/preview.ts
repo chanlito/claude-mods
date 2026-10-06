@@ -141,4 +141,4 @@ export const extensionFor = (mediaType: string) =>
   EXTENSIONS[mediaType] ?? "png";
 
 export const isImagePath = (path: string) =>
-  /\.(png|jpe?g|gif|webp|bmp|tiff?|avif|heic|svg)$/i.test(path);
+  /\.(png|jpe?g|gif|webp|bmp|tiff?|avif|heic)$/i.test(path);

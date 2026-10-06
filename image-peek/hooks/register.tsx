@@ -20,20 +20,26 @@ const seq = atom({ plugin: "image-peek", key: "seq" } as const, 0);
  * Prints `<w> <h>` (or `<w>x<h>`) on one line, then the thumbnail as base64
  * on the next: a PPM from ImageMagick or ffmpeg, a BMP from macOS's sips.
  * Exits non-zero when none of them is installed; the card then has no preview.
+ *
+ * "$1" is always an absolute path and "$4" the format its extension names,
+ * forced on ImageMagick ("png:/path") so no prefix (\`|cmd\`, \`msl:\`,
+ * \`ephemeral:\`) or content-sniffed coder (SVG, MVG, MSL in a .png) runs, and
+ * ffmpeg reads only the local file.
  */
 const PREVIEW_SCRIPT = `
-f="$1"; w="$2"; h="$3"
+f="$1"; w="$2"; h="$3"; t="$4"
+case "$f" in /*) ;; *) exit 2 ;; esac
 # Windows' own convert.exe (FAT to NTFS) is on a WSL PATH: not ImageMagick.
 has() { p=$(command -v "$1" 2>/dev/null) && case "$p" in /mnt/*) false ;; esac; }
 if has magick; then
-  magick identify -format "%w %h\\n" "$f[0]" 2>/dev/null | head -n 1
-  magick "$f[0]" -auto-orient -thumbnail "\${w}x\${h}" -background "#000000" -alpha remove -alpha off -depth 8 ppm:- | base64 | tr -d '\\n'
+  magick identify -format "%w %h\\n" "$t:$f[0]" 2>/dev/null | head -n 1
+  magick "$t:$f[0]" -auto-orient -thumbnail "\${w}x\${h}" -background "#000000" -alpha remove -alpha off -depth 8 ppm:- | base64 | tr -d '\\n'
 elif has convert && has identify; then
-  identify -format "%w %h\\n" "$f[0]" 2>/dev/null | head -n 1
-  convert "$f[0]" -auto-orient -thumbnail "\${w}x\${h}" -background "#000000" -alpha remove -alpha off -depth 8 ppm:- | base64 | tr -d '\\n'
+  identify -format "%w %h\\n" "$t:$f[0]" 2>/dev/null | head -n 1
+  convert "$t:$f[0]" -auto-orient -thumbnail "\${w}x\${h}" -background "#000000" -alpha remove -alpha off -depth 8 ppm:- | base64 | tr -d '\\n'
 elif has ffmpeg; then
-  ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$f" 2>/dev/null | head -n 1
-  ffmpeg -v error -i "$f" -frames:v 1 -vf "scale=w=$w:h=$h:force_original_aspect_ratio=decrease" -pix_fmt rgb24 -f image2pipe -vcodec ppm - | base64 | tr -d '\\n'
+  ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x -protocol_whitelist file "file:$f" 2>/dev/null | head -n 1
+  ffmpeg -v error -protocol_whitelist file -i "file:$f" -frames:v 1 -vf "scale=w=$w:h=$h:force_original_aspect_ratio=decrease" -pix_fmt rgb24 -f image2pipe -vcodec ppm - | base64 | tr -d '\\n'
 elif has sips; then
   ow=$(sips -g pixelWidth "$f" 2>/dev/null | awk '/pixelWidth/ { print $2 }')
   oh=$(sips -g pixelHeight "$f" 2>/dev/null | awk '/pixelHeight/ { print $2 }')
@@ -231,7 +237,20 @@ async function act(
   }
 }
 
+/** The plain raster formats a preview is made from, by extension. */
+const PREVIEW_FORMATS: Record<string, string> = {
+  png: "png",
+  jpg: "jpeg",
+  jpeg: "jpeg",
+  gif: "gif",
+  webp: "webp",
+  bmp: "bmp",
+};
+
 async function thumbnail($: EngineInterface, path: string): Promise<Thumbnail> {
+  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+  const format = PREVIEW_FORMATS[extension];
+  if (!path.startsWith("/") || !format) return {};
   try {
     const { exitCode, stdout } = await $.process.run(
       [
@@ -242,6 +261,7 @@ async function thumbnail($: EngineInterface, path: string): Promise<Thumbnail> {
         path,
         String(PREVIEW_WIDTH),
         String(PREVIEW_HEIGHT),
+        format,
       ],
       { timeoutMs: 15_000 },
     );
@@ -423,13 +443,15 @@ export const register: Register = (on, options) => {
 
     const found: Omit<PeekImage, "n">[] = [];
     for (const given of paths) {
+      // Open, Reveal and the preview only ever get an absolute path.
       const path = given.startsWith("/")
         ? given
         : (
             await $.process
               .run(["realpath", "--", given])
-              .catch(() => ({ stdout: given }))
+              .catch(() => ({ exitCode: 1, stdout: "" }))
           ).stdout.trim();
+      if (!path.startsWith("/")) continue;
       found.push({
         row: e.tool_use_id,
         path,

@@ -136,7 +136,10 @@ test("on WSL, Reveal selects the image in Explorer and Open opens it", async ($,
   const { ui, ran, toasts } = await sendImage($, on, {
     WSL_DISTRO_NAME: "Ubuntu",
   });
-  expect(ran.find((argv) => argv[0] === "sh")?.[4]).toBe(PATH);
+  const preview = ran.find((argv) => argv[0] === "sh");
+  expect(preview?.[4]).toBe(PATH);
+  // The decoder is forced from the extension, never sniffed from the content.
+  expect(preview?.[7]).toBe("png");
   expect(await ui.find({ key: "preview-1" })).toBeDefined();
   expect(
     await ui.find({ type: "Text", text: /#1 chart\.png · 640×960/ }),
@@ -209,6 +212,36 @@ test("a row with no image is drawn as the engine draws it", async ($, on) => {
       isErrored: false,
       isInterrupted: false,
     },
+  });
+  expect(await ui.find({ key: "reveal-1" })).toBe(undefined);
+});
+
+test("a path that does not resolve to an absolute one gets no card and runs nothing", async ($, on) => {
+  mock.env(on, { HOME: "/home/me" });
+  const ran: string[][] = [];
+  on("process.run", (_$, e) => {
+    ran.push([...e.argv]);
+    return { value: { exitCode: 1, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
+  });
+  on("ui.render", ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return <Text>engine row</Text>;
+  });
+  let callId = "";
+  const given = "|touch pwned.png";
+  on("tool.call", { tool: "SendUserFile" }, (_$, e) => {
+    callId = e.tool_use_id;
+    return { result: { attachments: [{ path: given, size: 10, isImage: true }] } };
+  });
+  await $.tool.call({ tool: "SendUserFile", files: [given], status: "normal" });
+
+  expect(ran).toEqual([["realpath", "--", given]]);
+  const ui = await $.ui.mount({
+    plugin: "image-peek",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: callId,
+    props: { tool_use_id: callId, tool: "SendUserFile", input: { files: [given] }, isRunning: false, isErrored: false, isInterrupted: false },
   });
   expect(await ui.find({ key: "reveal-1" })).toBe(undefined);
 });
