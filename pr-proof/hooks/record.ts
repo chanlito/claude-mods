@@ -133,6 +133,47 @@ export function findRefs(text: string): Ref[] {
     });
 }
 
+/** The PRs a command's output links to (`gh pr create` prints its URL). */
+export function findUrlRefs(text: string): Ref[] {
+  return findRefs(
+    [...text.matchAll(URL_REF)].map((m) => m[0]).join(" "),
+  );
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The records a tool call touched by path: `<root>/<repo>/<pr>`, written out
+ * or as `~/…` when the root sits under home.
+ */
+export function findRecordPaths(text: string, root: string, home: string): Ref[] {
+  const roots = [root];
+  if (home && root.startsWith(`${home}/`)) roots.push(`~${root.slice(home.length)}`);
+  const re = new RegExp(
+    `(?:${roots.map(escapeRe).join("|")})/([\\w][\\w.-]*)/(\\d+)(?![\\w])`,
+    "g",
+  );
+  return findRefs(
+    [...text.matchAll(re)].map((m) => `${m[1]}#${m[2]}`).join(" "),
+  );
+}
+
+/** The text a tool row can carry a PR URL in: Bash's stdout. */
+export function outputText(tool: string, output: unknown): string {
+  if (tool !== "Bash" || !output || typeof output !== "object") return "";
+  const stdout = (output as { stdout?: unknown }).stdout;
+  return typeof stdout === "string" ? stdout : "";
+}
+
+/** `name#541`, the form the session's list of seen PRs keeps. */
+export const refKey = (r: Ref) => `${r.name ?? ""}#${r.pr}`;
+
+/** The key back to a ref. */
+export function parseRefKey(key: string): Ref | undefined {
+  const m = /^([\w.-]*)#(\d+)$/.exec(key);
+  return m ? { ...(m[1] ? { name: m[1] } : {}), pr: Number(m[2]) } : undefined;
+}
+
 const nameOf = (r: ProofRecord) => r.repo?.split("/").at(-1);
 
 /**
