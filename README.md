@@ -6,6 +6,7 @@ also a plugin marketplace: `.claude-plugin/marketplace.json` lists every mod.
 | Mod | What it does |
 | --- | --- |
 | [image-peek](./image-peek) | Previews pasted images and images Claude sends, with Open and Reveal (Explorer on WSL/Windows, Finder on macOS) buttons and `/reveal-image`, `/open-image` |
+| [pr-proof](./pr-proof) | Adds Reveal proof under a reply that names a PR: outlined before/after screenshots, the checks and what was not checked, from `~/pr-proof/<repo>/<pr>/proof.json`; ships the `record-proof` skill that writes it |
 
 ## Install
 

@@ -1,0 +1,24 @@
+{
+  "name": "pr-proof",
+  "version": "0.1.0",
+  "description": "Shows the proof behind a PR under the reply that names it: checks, before/after screenshots, what was not checked, with Open and Reveal buttons",
+  "author": {
+    "name": "Chanlito Hem"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "root": {
+      "type": "string",
+      "title": "Records folder",
+      "description": "Where PR proof records live: <root>/<repo>/<pr>/proof.json. ~ is your home folder.",
+      "default": "~/pr-proof"
+    },
+    "preview": {
+      "type": "string",
+      "title": "Preview",
+      "description": "auto: the picture itself on kitty or Ghostty, colored blocks elsewhere. image or blocks to choose.",
+      "options": ["auto", "image", "blocks"],
+      "default": "auto"
+    }
+  }
+}
