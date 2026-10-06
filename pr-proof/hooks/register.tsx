@@ -491,8 +491,9 @@ export const register: Register = (on, options) => {
     return next(e);
   });
 
-  on("command.run", async ($, e, next) => {
-    if (e.command !== "proof") return next(e);
+  // Matched to its own command: a hook with no matcher counts as answering every
+  // command, and its name shows on every command's output.
+  on("command.run", { command: "proof" }, async ($, e) => {
     const root = await rootOf($, rootSetting);
     const records = await recordsIn($, root, true);
     const asked = e.args.trim();

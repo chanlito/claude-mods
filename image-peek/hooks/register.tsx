@@ -1,5 +1,5 @@
 import { atom, read, update } from "claude-code";
-import type { EngineInterface, Register, RenderInput } from "claude-code";
+import type { CommandRunInput, EngineInterface, Register, RenderInput } from "claude-code";
 
 import type { PeekImage, PeekPreview } from "../types";
 import { decodePreview, extensionFor, fromBase64, isImagePath } from "./preview";
@@ -411,6 +411,30 @@ async function cards(
   });
 }
 
+/**
+ * /reveal-image and /open-image. Hooked once per command with a matcher: a
+ * hook with no matcher counts as answering every command, and its name shows
+ * on every command's output.
+ */
+async function imageCommand($: EngineInterface, e: CommandRunInput) {
+  const list = await read($, images);
+  const asked = e.args.trim().replace(/^#/, "");
+  const img = asked
+    ? list.find((one) => one.n === Number(asked))
+    : list.at(-1);
+  if (!img) {
+    return {
+      text:
+        list.length === 0
+          ? "No images yet: paste one, or ask Claude to send one."
+          : `No image #${asked}. Known: ${list.map((one) => `#${one.n}`).join(", ")}.`,
+    };
+  }
+  return {
+    text: await act($, e.command === "open-image" ? "open" : "reveal", img),
+  };
+}
+
 export const register: Register = (on, options) => {
   const setting = String(options.preview ?? "auto");
 
@@ -430,26 +454,8 @@ export const register: Register = (on, options) => {
     return next(e);
   });
 
-  on("command.run", async ($, e, next) => {
-    if (e.command !== "reveal-image" && e.command !== "open-image")
-      return next(e);
-    const list = await read($, images);
-    const asked = e.args.trim().replace(/^#/, "");
-    const img = asked
-      ? list.find((one) => one.n === Number(asked))
-      : list.at(-1);
-    if (!img) {
-      return {
-        text:
-          list.length === 0
-            ? "No images yet: paste one, or ask Claude to send one."
-            : `No image #${asked}. Known: ${list.map((one) => `#${one.n}`).join(", ")}.`,
-      };
-    }
-    return {
-      text: await act($, e.command === "open-image" ? "open" : "reveal", img),
-    };
-  });
+  on("command.run", { command: "reveal-image" }, imageCommand);
+  on("command.run", { command: "open-image" }, imageCommand);
 
   // A pasted image lives only inside the prompt row, as base64: keep a copy
   // on disk so there is a file to open and reveal.
