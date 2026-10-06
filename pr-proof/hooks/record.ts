@@ -32,7 +32,7 @@ export type ProofRecord = {
 };
 
 /** A PR named in a reply: `name#541`, `owner/name#541`, a PR URL or `#541`. */
-export type Ref = { name?: string; pr: number };
+export type Ref = { owner?: string; name?: string; pr: number };
 
 const str = (v: unknown) =>
   typeof v === "string" && v.trim() ? v.trim() : undefined;
@@ -108,17 +108,22 @@ export function parseRecord(
   };
 }
 
-const URL_REF = /https?:\/\/github\.com\/[\w.-]+\/([\w.-]+)\/pull\/(\d+)/g;
-const NAMED_REF = /(?<![\w/#.-])(?:[\w.-]+\/)?([A-Za-z][\w.-]*)#(\d+)\b/g;
+const URL_REF = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/g;
+const NAMED_REF = /(?<![\w/#.-])(?:([\w.-]+)\/)?([A-Za-z][\w.-]*)#(\d+)\b/g;
 const BARE_REF = /(?<![\w/#.-])#(\d+)\b/g;
 
 /** Every PR a reply names, each once, in the order they first appear. */
 export function findRefs(text: string): Ref[] {
   const found: { at: number; ref: Ref }[] = [];
+  const ref = (owner: string | undefined, name: string | undefined, pr: string | undefined): Ref => ({
+    ...(owner ? { owner } : {}),
+    ...(name ? { name } : {}),
+    pr: Number(pr),
+  });
   for (const m of text.matchAll(URL_REF))
-    found.push({ at: m.index ?? 0, ref: { name: m[1], pr: Number(m[2]) } });
+    found.push({ at: m.index ?? 0, ref: ref(m[1], m[2], m[3]) });
   for (const m of text.matchAll(NAMED_REF))
-    found.push({ at: m.index ?? 0, ref: { name: m[1], pr: Number(m[2]) } });
+    found.push({ at: m.index ?? 0, ref: ref(m[1], m[2], m[3]) });
   for (const m of text.matchAll(BARE_REF))
     found.push({ at: m.index ?? 0, ref: { pr: Number(m[1]) } });
   const seen = new Set<string>();

@@ -43,8 +43,8 @@ test("a reply's PR refs: names, owner/name, URLs and bare numbers, each once", (
     ),
   ).toEqual([
     { name: "web", pr: 541 },
-    { name: "shop-web", pr: 541 },
-    { name: "api", pr: 12 },
+    { owner: "acme", name: "shop-web", pr: 541 },
+    { owner: "acme", name: "api", pr: 12 },
     { pr: 7 },
   ]);
 });
@@ -143,7 +143,12 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux", 
     if (e.argv[0] === "sh")
       return answer(0, `1000 625\n${e.argv[8] === "image" ? PNG : toBase64(PPM)}`);
     if (e.argv[0] === "git") return answer(0, "/home/me/code/shop-web\n");
-    if (e.argv[0] === "gh" && e.argv[1] === "api") return answer(0, merged.has(e.argv[2] ?? "") ? "2026-10-01T00:00:00Z\n" : "\n");
+    if (e.argv[0] === "gh" && e.argv[1] === "api") {
+      const path = e.argv[2] ?? "";
+      if (merged.has(path)) return answer(0, "closed\n");
+      // Only the PRs a test names exist; any other path is no PR at all.
+      return /pulls\/(541|12|77|99)$/.test(path) ? answer(0, "open\n") : answer(1, "");
+    }
     if (e.argv[0] === "wslpath") return answer(0, `\\\\wsl.localhost\\Ubuntu${e.argv[2]?.replaceAll("/", "\\")}\n`);
     if (e.argv[0] === "uname") return answer(0, `${uname}\n`);
     return answer(0, "");
@@ -311,7 +316,7 @@ test("Open reveals a file that resolves outside the record, or whose bytes are a
 const PR_URL = "https://github.com/acme/shop-web/pull/541";
 
 test("a command's PR URLs and a call's record paths are refs", () => {
-  expect(findUrlRefs(`Creating pull request\n${PR_URL}\n`)).toEqual([{ name: "shop-web", pr: 541 }]);
+  expect(findUrlRefs(`Creating pull request\n${PR_URL}\n`)).toEqual([{ owner: "acme", name: "shop-web", pr: 541 }]);
   // Only URLs: "#7" in a command's chatter is not a PR it made.
   expect(findUrlRefs("closes #7, see web#541")).toEqual([]);
   expect(
@@ -519,5 +524,36 @@ test("an open PR, asked of gh, keeps its button", async ($, on) => {
   const ui = await reply($, "web#541 is ready.");
   expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
   expect(ran.some((argv) => argv[0] === "gh" && argv[2] === "repos/acme/shop-web/pulls/541")).toBe(true);
+});
+
+const mountReply = ($: Engine, requestId: string, text: string) =>
+  $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "AssistantMessage",
+    requestId,
+    props: { text, isFirstOfReply: true },
+  });
+
+test("an open PR named with no record says its proof is missing", async ($, on) => {
+  const { ran } = stage($, on, {});
+  const ui = await mountReply($, "missing-1", "api#99 is ready for review.");
+  expect(await ui.find({ type: "Text", text: "! No proof recorded" })).toBeDefined();
+  // The owner came from the record of the same repo, acme/api.
+  expect(ran.some((argv) => argv[0] === "gh" && argv[2] === "repos/acme/api/pulls/99")).toBe(true);
+});
+
+test("a merged PR, an unknown number and a bare #n with no record say nothing", async ($, on) => {
+  stage($, on, {}, "Linux", new Set(["repos/acme/api/pulls/99"]));
+  const ui = await mountReply($, "missing-2", "api#99 merged; api#5 and #99 too.");
+  expect(await ui.find({ type: "Text", text: "! No proof recorded" })).toBe(undefined);
+});
+
+test("a recorded PR and a missing one in one reply are told apart", async ($, on) => {
+  stage($, on, {});
+  const ui = await mountReply($, "missing-3", "web#541 and api#99 are ready.");
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "! No proof recorded" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "api#99" })).toBeDefined();
 });
 
