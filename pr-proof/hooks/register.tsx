@@ -37,7 +37,7 @@ function thumbWidthFor(columns: number | undefined): number {
 /** How long a scan of the records folder is reused before it is read again. */
 const INDEX_TTL_MS = 10_000;
 /** How many records one reply shows a button for. */
-const MAX_PER_REPLY = 3;
+const MAX_PER_REPLY = 5;
 
 const open = atom({ plugin: "pr-proof", key: "open" } as const, []);
 const seen = atom({ plugin: "pr-proof", key: "seen" } as const, []);
@@ -553,7 +553,7 @@ async function details(
       )}
       <Box flexDirection="row" gap={2}>
         {/* A second Hide at the foot, so an open proof taller than the screen closes without scrolling back up. */}
-        <Button key={`${id}-hide`} label="▴ Hide proof" onPress={hide} />
+        <Button key={`${id}-hide`} label="▴ Close" onPress={hide} />
         <Button
           key={`${id}-folder`}
           label="Reveal folder"
@@ -612,7 +612,7 @@ async function withProof(
     blocks.push(
       <Box key={key} flexDirection="column" paddingLeft={2}>
         <Box flexDirection="row" gap={1}>
-          <Button key={`${key}-toggle`} label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"} onPress={toggle} />
+          <Button key={`${key}-toggle`} label={isOpen ? "▾ Proof" : "▸ Proof"} onPress={toggle} />
           {/* The row sits under the line that names the PR: its name only tells two buttons apart. */}
           {found.length > 1 && <Text dimColor>{labelOf(r)}</Text>}
         </Box>

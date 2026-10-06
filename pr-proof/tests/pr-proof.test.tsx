@@ -545,3 +545,19 @@ test("an open PR named with no record draws nothing", async ($, on) => {
   expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
   expect(await ui.find({ type: "Button" })).toBe(undefined);
 });
+
+test("a reply naming five PRs draws a ▸ Proof button for each one with a record", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "AssistantMessage",
+    requestId: "five",
+    props: { text: "web#541, api#12, and three with no record: api#77, api#99, web#5.", isFirstOfReply: true },
+  });
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  expect(await ui.find({ key: "pp-api-12-toggle" })).toBeDefined();
+  const toggle = await ui.find({ key: "pp-api-12-toggle" });
+  expect(toggle?.props.label).toBe("▸ Proof");
+});
+

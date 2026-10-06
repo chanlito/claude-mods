@@ -1,6 +1,6 @@
 # pr-proof
 
-Shows what an agent verified on a PR, under the reply that names it. When Claude writes "shop-web#541 is ready for review", pr-proof adds **▸ Reveal proof**. The same button goes under Claude Code's own "Created PR #541" line, found from the URL `gh pr create` printed. Press it to see:
+Shows what an agent verified on a PR, under the reply that names it. When Claude writes "shop-web#541 is ready for review", pr-proof adds **▸ Proof**. The same button goes under Claude Code's own "Created PR #541" line, found from the URL `gh pr create` printed. Press it to see:
 
 - each change on screen as a before and after picture, outlined in red where it changed;
 - every check with where it ran and whether it passed, failed or was skipped;
