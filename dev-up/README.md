@@ -187,5 +187,9 @@ Under WSL, yes. On native Windows, no: it needs `sh`.
 ## Develop
 
 `claude plugin validate dev-up`, `claude plugin test dev-up`, and
-`dev-up/tests/no-project-names.sh`, which fails if a real project's names reach
-the mod. Those names belong in that project's stack file.
+`dev-up/tests/no-project-names.sh`, which fails if one of your projects' names
+reaches the mod. It takes the names from your own stack files (each stack's
+name, root folder, and `cwd:` and `compose:` folders), plus
+`<stacks>/private-words`, one word per line, for names a stack file doesn't
+spell out. So the check names no project itself. Those names belong in the
+project's stack file.
