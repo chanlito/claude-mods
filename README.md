@@ -5,6 +5,7 @@ also a plugin marketplace: `.claude-plugin/marketplace.json` lists every mod.
 
 | Mod | What it does |
 | --- | --- |
+| [dev-up](./dev-up) | Brings up a folder's dev stack from `~/.claude/dev-stacks/<name>.yml` with `/dev-up`: docker compose, detached dev servers, one-off tasks and check scripts, one pass at a time, with the stack's state in the status line |
 | [image-peek](./image-peek) | Previews pasted images and images Claude sends, with Open and Reveal (Explorer on WSL/Windows, Finder on macOS) buttons and `/reveal-image`, `/open-image` |
 
 ## Install
