@@ -1,0 +1,17 @@
+{
+  "name": "dev-up",
+  "version": "0.1.0",
+  "description": "Brings up a folder's dev stack from a YAML stack file: docker compose, detached dev servers, one-off tasks and check scripts, one pass at a time, with each service as a colored dot under the prompt",
+  "author": {
+    "name": "Chanlito Hem"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "stacks": {
+      "type": "string",
+      "title": "Stacks folder",
+      "description": "Where stack files live: <folder>/<name>.yml, each with a root: folder it covers. ~ is your home folder.",
+      "default": "~/.claude/dev-stacks"
+    }
+  }
+}

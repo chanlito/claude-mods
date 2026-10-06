@@ -1,0 +1,578 @@
+import type { Engine } from "claude-code/testing";
+import type { On } from "claude-code";
+import { expect, mock, test } from "claude-code/testing";
+
+import { composeState, parseLine, parseStack, pickStack, plan, stateOfLines, statusLine, type Observed } from "../hooks/stack";
+import { parseYaml } from "../hooks/yaml";
+
+const HOME = "/home/me";
+const STACKS = `${HOME}/.claude/dev-stacks`;
+const ROOT = `${HOME}/code/shop`;
+
+/** The made-up stack every test runs on: no real project belongs in this mod. */
+const SHOP = `# a test stack
+name: shop
+root: ~/code/shop
+notes: shop/NOTES.md
+
+services:
+  db:
+    compose: .                     # docker-compose.yml at the root
+    ready: { healthy: [postgres], up: [mail] }
+  web:
+    cwd: web
+    run: pnpm dev
+    port: 3000
+    after: [db]
+  codegen:
+    cwd: web
+    task: pnpm codegen
+    creates: src/generated
+    after: [web]
+  worker:
+    run: "pnpm worker # not a comment"
+    after:
+      - db
+  seed:
+    check: shop/seed.sh
+    probe: test -f seeded
+    after: [web]
+
+report:
+  web: http://localhost:3000/health
+`;
+
+const stack = () => parseStack(SHOP, `${STACKS}/shop.yml`, HOME);
+const seen = (states: Record<string, Observed[string]["state"]>): Observed =>
+  Object.fromEntries(Object.entries(states).map(([k, state]) => [k, { state }]));
+
+test("the YAML subset: maps, lists, flow lists and maps, quotes, comments", () => {
+  expect(
+    parseYaml(`a: 1
+b: "x # y"
+c: [p, 'q r', 3]
+d: { k: v, l: [1, 2] }
+e:
+  - one
+  - name: two
+    deep: true
+f: npm run start:dev   # trailing comment
+g: http://localhost:8080/x
+h:
+`),
+  ).toEqual({
+    a: 1,
+    b: "x # y",
+    c: ["p", "q r", 3],
+    d: { k: "v", l: [1, 2] },
+    e: ["one", { name: "two", deep: true }],
+    f: "npm run start:dev",
+    g: "http://localhost:8080/x",
+    h: null,
+  });
+  expect(() => parseYaml("a: 1\n  b: 2")).toThrow(/line 2/);
+  expect(() => parseYaml("a: [1, 2")).toThrow(/line 1/);
+  expect(() => parseYaml("a: 1\na: 2")).toThrow(/twice/);
+});
+
+test("a stack file: paths resolve, kinds are told apart, dependencies come first", () => {
+  const s = stack();
+  expect(s.name).toBe("shop");
+  expect(s.root).toBe(ROOT);
+  expect(s.notes).toBe(`${STACKS}/shop/NOTES.md`);
+  expect(s.services.map((x) => `${x.name}:${x.kind}`)).toEqual([
+    "db:compose",
+    "web:server",
+    "codegen:task",
+    "worker:server",
+    "seed:check",
+  ]);
+  const [db, web, codegen, worker, seed] = s.services;
+  expect(db).toMatchObject({ dir: ROOT, healthy: ["postgres"], running: ["mail"] });
+  expect(web).toMatchObject({ dir: `${ROOT}/web`, run: "pnpm dev", port: 3000, after: ["db"] });
+  expect(codegen?.creates).toBe(`${ROOT}/web/src/generated`);
+  expect(worker).toMatchObject({ dir: ROOT, run: "pnpm worker # not a comment", after: ["db"] });
+  expect(seed?.check).toBe(`${STACKS}/shop/seed.sh`);
+  expect(s.report).toEqual([{ name: "web", url: "http://localhost:3000/health" }]);
+});
+
+test("a stack file that cannot work says why", () => {
+  const bad = (text: string) => () => parseStack(text, `${STACKS}/x.yml`, HOME);
+  expect(bad("services: { a: { run: x } }")).toThrow(/root/);
+  expect(bad("root: /x\nservices: { a: { run: x, after: [b] } }")).toThrow(/"b", which is not a service/);
+  expect(bad("root: /x\nservices: { a: { run: x, task: y } }")).toThrow(/exactly one/);
+  expect(bad("root: /x\nservices: { a: { run: x, after: [b] }, b: { run: y, after: [a] } }")).toThrow(/waits for itself/);
+  expect(bad("root: /x\nservices: { a: { task: x } }")).toThrow(/creates/);
+});
+
+test("the deepest root that holds the folder wins", () => {
+  const outer = parseStack("root: ~/code\nservices: { a: { run: x } }", `${STACKS}/outer.yml`, HOME);
+  const shop = stack();
+  expect(pickStack([outer, shop], `${ROOT}/web/src`)?.name).toBe("shop");
+  expect(pickStack([outer, shop], `${HOME}/code/other`)?.name).toBe("outer");
+  expect(pickStack([outer, shop], `${HOME}/code-old`)).toBe(undefined);
+});
+
+test("everything down: start the containers, skip what waits for them", () => {
+  const steps = plan(stack(), {});
+  expect(steps.map((s) => `${s.prefix} ${s.text}`)).toEqual([
+    "STARTED db: docker compose up -d",
+    "SKIP web: waits for db; next run",
+    "SKIP codegen: waits for web; next run",
+    "SKIP worker: waits for db; next run",
+    "SKIP seed: waits for web; next run",
+  ]);
+  expect(steps[0]?.action).toBe("compose");
+});
+
+test("a service started this pass does not count as up until the next pass", () => {
+  const steps = plan(stack(), seen({ db: "up" }));
+  expect(steps.map((s) => `${s.prefix} ${s.service}`)).toEqual([
+    "UP db",
+    "STARTED web",
+    "SKIP codegen",
+    "STARTED worker",
+    "SKIP seed",
+  ]);
+});
+
+test("all up but a crashed server: warn, then start it again; missing node_modules: warn, never start", () => {
+  const s = stack();
+  const steps = plan(s, {
+    ...seen({ db: "up", codegen: "up", seed: "up" }),
+    web: { state: "broken", why: "exited since it was started" },
+    worker: { state: "down", needsInstall: `no node_modules in ${ROOT}` },
+  });
+  expect(steps.map((x) => `${x.prefix} ${x.text}`)).toEqual([
+    "UP db: containers up",
+    "WARN web: exited since it was started",
+    "STARTED web: pnpm dev",
+    "UP codegen: done",
+    `WARN worker: no node_modules in ${ROOT}: install there first`,
+    "SKIP seed: waits for web; next run",
+  ]);
+});
+
+test("the status line", () => {
+  expect(statusLine(stack(), seen({ db: "up", web: "starting", worker: "broken" }))).toBe(
+    "shop  ● db  ◐ web  ○ codegen  ✕ worker  ○ seed",
+  );
+  expect(statusLine(stack(), seen({ codegen: "up" }))).toMatch(/✓ codegen/);
+});
+
+test("docker compose ps: healthy, still starting, stale after a Docker restart, down", () => {
+  const db = stack().services[0]!;
+  const row = (Service: string, State: string, Health = "", Status = "Up 2 minutes") =>
+    JSON.stringify({ Service, State, Health, Status });
+  expect(composeState(db, [row("postgres", "running", "healthy"), row("mail", "running")].join("\n"))).toEqual({
+    state: "up",
+    why: "postgres healthy, mail up",
+  });
+  expect(composeState(db, `[${row("postgres", "running", "starting")},${row("mail", "running")}]`).state).toBe("starting");
+  expect(composeState(db, [row("postgres", "exited", "", "Exited (127) 3 hours ago"), row("mail", "running")].join("\n"))).toMatchObject({
+    state: "broken",
+    why: expect.stringMatching(/--force-recreate postgres/),
+  });
+  expect(composeState(db, row("postgres", "running", "healthy")).state).toBe("down");
+  expect(composeState(db, "").state).toBe("down");
+});
+
+test("a check script's lines", () => {
+  expect(parseLine("UP      emulator booted")).toEqual({ prefix: "UP", text: "emulator booted" });
+  expect(parseLine("api 200  metro 200")).toBe(undefined);
+  expect(stateOfLines(["UP", "UP"])).toBe("up");
+  expect(stateOfLines(["UP", "SKIP"])).toBe("starting");
+  expect(stateOfLines(["UP", "WARN"])).toBe("broken");
+});
+
+/* ---- through the engine ---- */
+
+const answer = (exitCode: number, stdout: string, stderr = "") => ({
+  value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
+});
+
+/** The shop stack on disk, the session in its web folder, Docker and the shell answered from memory. */
+function stage(
+  on: On,
+  machine: {
+    compose: string;
+    ports?: number[];
+    pids?: string[];
+    files?: string[];
+    cwd?: string;
+    mtimes?: Record<string, number>;
+    /** Whether the check service's probe passes. */
+    probe?: boolean;
+    /** Per folder git is run in: its top folder and the worktrees `git worktree list` gives. */
+    git?: Record<string, [string, string[]]>;
+  },
+) {
+  mock.env(on, { HOME });
+  mock.clock(on);
+  const ran: { argv: string[]; cwd?: string }[] = [];
+  const files = new Set([`${STACKS}/shop.yml`, ...(machine.files ?? [])]);
+  const written = new Map<string, string>();
+  const gitIn: string[] = [];
+  on("session.cwd", () => ({ value: machine.cwd ?? `${ROOT}/web` }));
+  on("fs.list", (_$, e) =>
+    ({ value: e.path === STACKS ? [{ name: "shop.yml", kind: "file" as const, size: 1, mtimeMs: 0, isLink: false }] : [] }),
+  );
+  on("fs.read", (_$, e) => {
+    if (e.path === `${STACKS}/shop.yml`) return { value: SHOP };
+    return { value: written.get(e.path) ?? "" };
+  });
+  on("fs.write", (_$, e) => {
+    written.set(e.path, e.text);
+    return { value: undefined };
+  });
+  on("fs.exists", (_$, e) => ({ value: files.has(e.path) }));
+  on("fs.stat", (_$, e) => {
+    const mtimeMs = machine.mtimes?.[e.path];
+    if (mtimeMs === undefined) throw new Error(`ENOENT: ${e.path}`);
+    return { value: { kind: "file" as const, size: 1, mtimeMs, isLink: false } };
+  });
+  on("process.run", (_$, e) => {
+    ran.push({ argv: [...e.argv], cwd: e.init?.cwd });
+    const [cmd, a, b] = e.argv;
+    if (cmd === "docker" && a === "compose" && b === "ps") return answer(0, machine.compose);
+    if (cmd === "sh" && e.argv[2]?.includes("PORT"))
+      return answer(0, [...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
+    if (cmd === "curl") return answer(0, "200");
+    if (cmd === "tail") return answer(e.argv[3]!.endsWith("web.log") ? 0 : 1, "\u001b[32mready\u001b[39m on :3000\r\nGET / 200\n");
+    if (cmd === "docker" && e.argv[2] === "logs") return answer(0, "postgres-1  | database system is ready\n");
+    if (cmd === "sh" && e.argv[2] === "test -f seeded") return answer(machine.probe ? 0 : 1, "");
+    if (cmd === "git") {
+      gitIn.push(e.argv[2]!);
+      const hit = machine.git?.[e.argv[2]!];
+      if (!hit) return answer(128, "", "fatal: not a git repository");
+      if (e.argv[3] === "rev-parse") return answer(0, `${hit[0]}\n`);
+      if (e.argv[3] === "worktree") return answer(0, hit[1].map((w) => `worktree ${w}\nHEAD abc\n`).join("\n"));
+    }
+    if (cmd === `${STACKS}/shop/seed.sh`) return answer(0, "UP      seeded\nrows 12\n");
+    return answer(0, "");
+  });
+  on("ui.render", ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return <Text>? for shortcuts</Text>;
+  });
+  const panes = new Set<string>();
+  on("ui.open", (_$, e) => {
+    panes.add(e.id);
+    return { value: { isPlaced: true } };
+  });
+  on("ui.panes", () => ({
+    value: [...panes].map((id) => ({ id, title: "Dev stack", isShown: true, isFocused: false, isPlaced: true })),
+  }));
+  on("ui.toast", () => ({ value: undefined }));
+  return { ran, written, gitIn, panes };
+}
+
+const HEALTHY = [
+  JSON.stringify({ Service: "postgres", State: "running", Health: "healthy", Status: "Up" }),
+  JSON.stringify({ Service: "mail", State: "running", Health: "", Status: "Up" }),
+].join("\n");
+
+const devUp = ($: Engine, args = "") =>
+  $.command.run({ command: "dev-up", args, origin: { kind: "composer" }, presentation: { isFullscreen: false, columns: 120 } });
+
+test("/dev-up with Docker down starts the containers in the root and nothing else", async ($, on) => {
+  const { ran } = stage(on, { compose: "" });
+  const out = await devUp($);
+  expect(out.text).toMatch(/^STARTED db: docker compose up -d/m);
+  expect(out.text).toMatch(/^SKIP {4}web: waits for db; next run/m);
+  expect(ran.find((r) => r.argv.join(" ") === "docker compose up -d")?.cwd).toBe(ROOT);
+  expect(ran.some((r) => r.argv[2]?.includes("setsid"))).toBe(false);
+});
+
+test("/dev-up with the containers healthy starts the servers detached, with a log and a pid file", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, files: [`${ROOT}/web/node_modules`] });
+  const out = await devUp($);
+  const starts = ran.filter((r) => r.argv[2]?.includes("setsid"));
+  expect(starts.map((r) => r.argv.slice(4))).toEqual([
+    [`${ROOT}/web`, "pnpm dev", `${HOME}/.cache/dev-up/shop/web.log`, `${HOME}/.cache/dev-up/shop/web.pid`],
+    [ROOT, "pnpm worker # not a comment", `${HOME}/.cache/dev-up/shop/worker.log`, `${HOME}/.cache/dev-up/shop/worker.pid`],
+  ]);
+  expect(out.text).toMatch(/^UP {6}db: postgres healthy, mail up/m);
+  expect(out.text).toMatch(/^STARTED web: pnpm dev {2}\(log .*web\.log\)/m);
+  expect(out.text).toMatch(/^report {2}web 200/m);
+  expect(out.text).toMatch(/^shop {2}● db {2}◐ web {2}○ codegen {2}◐ worker {2}○ seed$/m);
+});
+
+test("with the server answering, the next pass runs the task and the check script and relays its lines", async ($, on) => {
+  const { ran } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    pids: ["PID web alive", "PID worker alive"],
+    files: [`${ROOT}/web/node_modules`],
+  });
+  const out = await devUp($);
+  expect(out.text).toMatch(/^UP {6}web: :3000/m);
+  expect(out.text).toMatch(/^STARTED codegen: pnpm codegen/m);
+  expect(out.text).toMatch(/^UP {6}worker: running/m);
+  expect(out.text).toMatch(/^UP {6}seed: seeded\n {8}rows 12/m);
+  expect(ran.find((r) => r.argv[0] === `${STACKS}/shop/seed.sh`)?.cwd).toBe(ROOT);
+});
+
+test("--dry-run says what it would do and starts nothing", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, files: [`${ROOT}/web/node_modules`] });
+  const out = await devUp($, "--dry-run");
+  expect(out.text).toMatch(/^ACTION {2}web: pnpm dev {2}\(in .*\/web\)/m);
+  expect(ran.some((r) => r.argv[2]?.includes("setsid"))).toBe(false);
+});
+
+test("a folder no stack covers gets told where stacks live", async ($, on) => {
+  stage(on, { compose: "", cwd: "/tmp/elsewhere" });
+  const out = await devUp($);
+  expect(out.text).toMatch(/No stack covers \/tmp\/elsewhere\. A stack is \/home\/me\/\.claude\/dev-stacks\/<name>\.yml/);
+});
+
+test("the model's tool answers the same as the command", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"] });
+  const out = await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "status" });
+  expect(String(out.result)).toMatch(/^up {7}db {2}postgres healthy, mail up\nup {7}web/m);
+});
+
+test("restart adds its extra arguments to the command, this once", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  const out = await devUp($, "restart web -- --clear");
+  const stops = ran.filter((r) => r.argv[2]?.includes("holders()"));
+  const starts = ran.filter((r) => r.argv[2]?.includes("setsid"));
+  expect(stops.map((r) => r.argv.slice(4, 6))).toEqual([[`${HOME}/.cache/dev-up/shop/web.pid`, "3000"]]);
+  expect(starts.map((r) => r.argv[5])).toEqual(["pnpm dev '--' '--clear'"]);
+  expect(out.text).toMatch(/^Restarted web with -- --clear {2}\(log /);
+});
+
+test("the tool passes restart's args through; containers take none", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "restart", service: "web", args: "-- --clear" });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual(["pnpm dev '--' '--clear'"]);
+  const out = await devUp($, "restart db -- --pull");
+  expect(out.text).toMatch(/db is containers; restart takes no extra arguments/);
+});
+
+test("restart's extra words reach the shell as text, never as commands", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "restart", service: "web", args: "; touch /tmp/x $(id) it's" });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual([
+    "pnpm dev ';' 'touch' '/tmp/x' '$(id)' 'it'\\''s'",
+  ]);
+});
+
+test("a stack's name must be a plain folder name", () => {
+  expect(() => parseStack("name: ../x\nroot: /x\nservices: { a: { run: x } }", `${STACKS}/x.yml`, HOME)).toThrow(/names a folder/);
+});
+
+test("a lockfile newer than the last install: warn and do not start", async ($, on) => {
+  const { ran } = stage(on, {
+    compose: HEALTHY,
+    files: [`${ROOT}/web/package.json`, `${ROOT}/web/node_modules`],
+    mtimes: { [`${ROOT}/web/package-lock.json`]: 2000, [`${ROOT}/web/node_modules/.package-lock.json`]: 1000 },
+  });
+  const out = await devUp($);
+  expect(out.text).toMatch(/^WARN {4}web: package-lock\.json in .*\/web changed since the last npm install: install there first/m);
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[4])).toEqual([ROOT]);
+});
+
+/* ---- worktrees ---- */
+
+const WT = `${HOME}/code/shop-wt/feat`;
+const GIT: Record<string, [string, string[]]> = {
+  [`${ROOT}/web`]: [ROOT, [ROOT, WT]],
+  [ROOT]: [ROOT, [ROOT, WT]],
+};
+
+test("use <worktree> moves the servers of that repo onto it, for every later pass", async ($, on) => {
+  const { ran, written } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    pids: ["PID web alive", "PID worker alive"],
+    files: [`${ROOT}/web/node_modules`, WT, `${WT}/web`],
+    git: GIT,
+  });
+  const out = await devUp($, `use ${WT}`);
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/use.json`)!)).toEqual({
+    web: `${WT}/web`,
+    codegen: `${WT}/web`,
+    worker: WT,
+  });
+  const starts = ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => `${r.argv[4]} ${r.argv[5]}`);
+  expect(starts).toEqual([`${WT}/web pnpm dev`, `${WT} pnpm worker # not a comment`]);
+  expect(out.text).toMatch(/^SKIP {4}codegen: now from .*shop-wt\/feat\/web; waits for web, so the next \/dev-up starts it/m);
+  expect(ran.filter((r) => r.argv[2]?.includes("holders()")).length).toBe(3);
+  expect(out.text).toMatch(/^STARTED web: from .*shop-wt\/feat\/web/m);
+  expect(out.text).toMatch(/◐ web@feat {2}○ codegen@feat {2}◐ worker@feat/);
+
+  const status = await devUp($, "status");
+  expect(status.text).toMatch(/^up {7}web {2}from .*shop-wt\/feat\/web/m);
+});
+
+test("restore puts them back in their own folders", async ($, on) => {
+  const { ran, written } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    files: [`${ROOT}/web/node_modules`, WT, `${WT}/web`],
+    git: GIT,
+  });
+  await devUp($, `use ${WT}`);
+  ran.length = 0;
+  const out = await devUp($, "restore web");
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/use.json`)!)).toEqual({ codegen: `${WT}/web`, worker: WT });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[4])).toEqual([`${ROOT}/web`]);
+  expect(out.text).toMatch(/^STARTED web: from .*\/code\/shop\/web /m);
+});
+
+test("use takes only a worktree git lists for a service's repo, and never runs git in the folder it is given", async ($, on) => {
+  const { gitIn, written } = stage(on, { compose: HEALTHY, git: GIT });
+  const out = await devUp($, "use /tmp/crafted");
+  expect(out.text).toMatch(/\/tmp\/crafted is not a worktree of any repo a server or task in shop runs from/);
+  expect(gitIn.every((dir) => dir === ROOT || dir === `${ROOT}/web`)).toBe(true);
+  expect(written.size).toBe(0);
+});
+
+test("a worktree that was removed drops out of the overrides", async ($, on) => {
+  const { written } = stage(on, { compose: HEALTHY, files: [WT, `${WT}/web`], git: GIT });
+  await devUp($, `use ${WT}`);
+  written.set(`${HOME}/.cache/dev-up/shop/use.json`, JSON.stringify({ web: "/gone/web" }));
+  expect((await devUp($, "status")).text).not.toMatch(/from \/gone/);
+});
+
+/* ---- the hint line ---- */
+
+const hint = ($: Engine, surface: "terminal" | "desktop") =>
+  $.ui.mount({
+    plugin: "dev-up",
+    surface,
+    component: "PromptHint",
+    requestId: "hint",
+    props: { isDraft: false, isWorking: false, hint: "? for shortcuts" },
+  });
+
+for (const surface of ["terminal", "desktop"] as const) {
+  test(`on ${surface}, the hint line keeps its own text and adds the stack's dots in color`, async ($, on) => {
+    stage(on, {
+      compose: HEALTHY,
+      ports: [3000],
+      pids: ["PID web alive", "PID worker dead"],
+      files: [`${ROOT}/web/node_modules`],
+    });
+    await devUp($, "status");
+    const ui = await hint($, surface);
+    expect(await ui.find({ type: "Text", text: "? for shortcuts" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "dev" })).toBeDefined();
+    expect(await ui.find({ key: "dev-up-db" })).toBeDefined();
+    expect((await ui.find({ type: "Text", text: "●" }))?.props).toMatchObject({ color: "success" });
+    expect((await ui.find({ type: "Text", text: "✕" }))?.props).toMatchObject({ color: "error" });
+    expect((await ui.find({ type: "Text", text: "○" }))?.props).toMatchObject({ dimColor: true });
+  });
+}
+
+test("with no stack for the folder, the hint line is left alone", async ($, on) => {
+  stage(on, { compose: "", cwd: "/tmp/elsewhere" });
+  await devUp($, "status");
+  const ui = await hint($, "terminal");
+  expect(await ui.find({ type: "Text", text: "? for shortcuts" })).toBeDefined();
+  expect(await ui.find({ key: "dev-up" })).toBe(undefined);
+});
+
+test("loading clears the plain status line older versions pinned", async ($, on) => {
+  stage(on, { compose: HEALTHY });
+  const cleared: (string | undefined)[] = [];
+  on("ui.status", (_$, e) => {
+    cleared.push(e.text);
+    return { value: undefined };
+  });
+  on("command.register", () => ({ value: { command: "dev-up" } }));
+  on("tool.register", () => ({ value: { tool: "mcp__dev-up__dev_up" } }));
+  on("session.start", () => ({ cwd: ROOT }));
+  await $.session.start({ cwd: ROOT } as never);
+  expect(cleared).toContain(undefined);
+});
+
+/* ---- check services between passes ---- */
+
+test("a check runs on every pass, its result is kept on disk, and the probe answers between passes", async ($, on) => {
+  const { ran, written } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    pids: ["PID web alive", "PID worker alive"],
+    files: [`${ROOT}/web/node_modules`, `${ROOT}/web/src/generated`],
+    probe: true,
+  });
+  await devUp($);
+  await devUp($);
+  expect(ran.filter((r) => r.argv[0] === `${STACKS}/shop/seed.sh`).length).toBe(2);
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/seed.check`)!)).toEqual({ state: "up", lines: ["UP      seeded", "rows 12"] });
+
+  ran.length = 0;
+  const status = await devUp($, "status");
+  expect(ran.some((r) => r.argv[0] === `${STACKS}/shop/seed.sh`)).toBe(false);
+  expect(ran.find((r) => r.argv[2] === "test -f seeded")?.cwd).toBe(ROOT);
+  expect(status.text).toMatch(/^up {7}seed$/m);
+});
+
+test("a finished task is a green check mark on the hint line", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/src/generated`] });
+  await devUp($, "status");
+  const ui = await hint($, "terminal");
+  expect((await ui.find({ type: "Text", text: "✓" }))?.props).toMatchObject({ color: "success" });
+});
+
+test("probe: on anything but a check service is an error", () => {
+  expect(() => parseStack("root: /x\nservices: { a: { run: x, probe: y } }", `${STACKS}/x.yml`, HOME)).toThrow(/probe: is for a check/);
+});
+
+/* ---- /dev-up panel ---- */
+
+const pane = ($: Engine, surface: "terminal" | "desktop", bodyColumns = 160) =>
+  $.ui.mount({
+    plugin: "dev-up",
+    surface,
+    component: "Pane",
+    requestId: "dev-up",
+    props: { title: "Dev stack", isFocused: false, bodyColumns, placement: "inline", scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  });
+
+for (const surface of ["terminal", "desktop"] as const) {
+  test(`on ${surface}, the panel shows a cell per service with its state and the end of its log`, async ($, on) => {
+    const { panes } = stage(on, {
+      compose: HEALTHY,
+      ports: [3000],
+      pids: ["PID web alive", "PID worker dead"],
+      files: [`${ROOT}/web/node_modules`],
+    });
+    const out = await devUp($, "panel");
+    expect(out.text).toMatch(/Opened the dev stack panel/);
+    expect(panes.has("dev-up")).toBe(true);
+    const ui = await pane($, surface);
+    for (const name of ["db", "web", "codegen", "worker", "seed"]) expect(await ui.find({ key: `cell-${name}` })).toBeDefined();
+    expect((await ui.find({ key: "cell-web" }))?.props).toMatchObject({ borderColor: "success" });
+    expect((await ui.find({ key: "cell-worker" }))?.props).toMatchObject({ borderColor: "error" });
+    expect((await ui.find({ key: "cell-codegen" }))?.props).toMatchObject({ borderDimColor: true });
+    expect(await ui.find({ type: "Text", text: /^ready on :3000$/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /^GET \/ 200$/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /database system is ready/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "(no log: not started by /dev-up)" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "(not run yet: /dev-up runs it)" })).toBeDefined();
+  });
+}
+
+test("the panel's restart button restarts that service", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  await devUp($, "panel");
+  const ui = await pane($, "terminal");
+  ran.length = 0;
+  await ui.press({ key: "restart-web" });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual(["pnpm dev"]);
+});
+
+test("a wide panel lays the cells out in three columns", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"] });
+  await devUp($, "panel");
+  expect((await (await pane($, "terminal", 161)).find({ key: "cell-db" }))?.props).toMatchObject({ width: 53 });
+});
+
+test("a narrow panel stacks them in one column", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"] });
+  await devUp($, "panel");
+  expect((await (await pane($, "terminal", 60)).find({ key: "cell-db" }))?.props).toMatchObject({ width: 60 });
+});
