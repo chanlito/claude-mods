@@ -20,8 +20,8 @@ Servers start detached (`setsid`), with a log and a pid file under
 `~/.cache/dev-up/<stack>/`. They outlive the turn, the Claude session and a
 reload of the mod, and every session in the stack's folder sees the same ones.
 The stack's state shows at the end of the hint line under the prompt, one
-colored dot per service: green up, yellow starting, red broken, dim down. It is
-refreshed every 30 seconds.
+colored dot per service: green up, yellow starting, red broken, dim down. A
+task whose output exists shows a green ✓. The dots refresh every 30 seconds.
 
 ## Installation
 
@@ -94,6 +94,7 @@ services:
 
   seed:
     check: shop/seed.sh    # a script (relative to this file)
+    probe: test -f .seeded # optional: a read-only command, exit 0 = up
     after: [web]
 
 report:                    # probed after every pass
@@ -115,7 +116,12 @@ Each service has exactly one of `compose`, `run`, `task` or `check`.
   the root as its working folder, `DEV_UP_STACK` and `DEV_UP_ROOT` set, and
   `--dry-run` on a dry run. It prints lines starting `UP`, `STARTED`, `SKIP`,
   `WARN` or `ACTION`, which `/dev-up` relays; any other line is shown as is.
-  The worst prefix it printed sets the service's state.
+  The worst prefix it printed sets the service's state. The script runs on
+  every pass once what it waits for is up, since it is its own health check.
+  Its last result is saved in `~/.cache/dev-up/<stack>/<service>.check`, so a
+  reload and every other session see it. Between passes the refresh never runs
+  the script, because it may act. If you give it a `probe:`, a read-only
+  command whose exit 0 means up, the refresh runs that instead, from the root.
 
 The file is a subset of YAML: maps, lists, `[a, b]`, `{ k: v }`, quotes and `#`
 comments.
