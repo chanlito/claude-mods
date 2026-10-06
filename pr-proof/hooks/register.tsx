@@ -179,13 +179,52 @@ const VIEWABLE = new Set([
 const isViewable = (path: string) =>
   VIEWABLE.has(path.split(".").at(-1)?.toLowerCase() ?? "");
 
+/** File signatures a picture or video starts with, as bytes at an offset. */
+const SIGNATURES: [number, number[]][] = [
+  [0, [0x89, 0x50, 0x4e, 0x47]], // PNG
+  [0, [0xff, 0xd8, 0xff]], // JPEG
+  [0, [0x47, 0x49, 0x46, 0x38]], // GIF8
+  [8, [0x57, 0x45, 0x42, 0x50]], // WEBP (after RIFF....)
+  [0, [0x42, 0x4d]], // BMP
+  [4, [0x66, 0x74, 0x79, 0x70]], // ftyp: MP4, MOV
+  [0, [0x1a, 0x45, 0xdf, 0xa3]], // WebM
+];
+const TEXT = new Set(["json", "txt", "md", "log", "csv"]);
+
+/** Whether the bytes are what the name says: a known picture or video, or plain text. */
+function looksLike(path: string, bytes: Uint8Array): boolean {
+  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+  if (TEXT.has(extension)) {
+    const head = bytes.subarray(0, 4096);
+    // A script or a desktop entry renamed to .txt is not text to open.
+    const start = new TextDecoder().decode(head.subarray(0, 64));
+    return !head.includes(0) && !start.startsWith("#!") && !start.includes("[Desktop Entry]");
+  }
+  return SIGNATURES.some(([at, sig]) => sig.every((b, i) => bytes[at + i] === b));
+}
+
+/**
+ * Open only a regular file (never a link, which could lead to an app) that a
+ * viewer would show. Linux's xdg-open can go by the content, not the name, so
+ * there the bytes must match too; a file over the 4 MiB read limit is revealed.
+ */
+async function canOpen($: EngineInterface, path: string): Promise<boolean> {
+  if (!isViewable(path)) return false;
+  const stat = await $.fs.stat(path).catch(() => undefined);
+  if (!stat || stat.kind !== "file" || stat.isLink) return false;
+  os ??= detectOs($);
+  if ((await os) !== "linux") return true;
+  const read = await $.fs.read(path, { as: "bytes" }).catch(() => undefined);
+  return read ? looksLike(path, fromBase64(read.base64)) : false;
+}
+
 async function act(
   $: EngineInterface,
   asked: "open" | "reveal",
   path: string,
 ): Promise<string> {
   const name = path.split("/").at(-1) ?? path;
-  const verb = asked === "open" && !isViewable(path) ? "reveal" : asked;
+  const verb = asked === "open" && !(await canOpen($, path)) ? "reveal" : asked;
   try {
     if (verb === "open") {
       await openFile($, path);

@@ -25,7 +25,7 @@ const RECORD = {
     { title: "Settings line", after: "settings-after.png" },
   ],
   checks: [
-    { claim: "Offline upgrade keeps every row", where: "Tablet", result: "pass", evidence: ["counts.json", "run.command"] },
+    { claim: "Offline upgrade keeps every row", where: "Tablet", result: "pass", evidence: ["counts.json", "run.command", "linked.png", "fake.png", "shot.png"] },
     { claim: "Killed upgrade recovers", where: "Tablet", result: "fail" },
     { claim: "Every crash state", where: "Unit tests", result: "pass" },
   ],
@@ -110,7 +110,14 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") 
     if (e.path === `${ROOT}/shop-web`) return { value: [entry("541")] };
     return { value: [] };
   });
-  on("fs.read", (_$, e) => ({ value: e.path.endsWith("/541/proof.json") ? JSON.stringify(RECORD) : "" }));
+  on("fs.read", (_$, e) => {
+    if (e.as === "bytes")
+      return { value: { base64: e.path.endsWith("fake.png") ? toBase64(new TextEncoder().encode("#!/bin/sh\nid\n")) : PNG } };
+    return { value: e.path.endsWith("/541/proof.json") ? JSON.stringify(RECORD) : "" };
+  });
+  on("fs.stat", (_$, e) => ({
+    value: { kind: "file" as const, size: 10, mtimeMs: 0, isLink: e.path.endsWith("linked.png") },
+  }));
   on("process.run", (_$, e) => {
     ran.push([...e.argv]);
     if (e.argv[0] === "sh")
@@ -254,4 +261,16 @@ test("a records folder whose name is not a plain name is skipped", async ($, on)
   });
   expect(out.text).toMatch(/shop-web#541/);
   expect(out.text).not.toMatch(/calc/);
+});
+
+test("Open reveals a link, and on Linux a file whose bytes are not what its name says", async ($, on) => {
+  const { ran } = stage($, on, {});
+  const ui = await reply($, "web#541 is ready.");
+  await ui.press({ key: "pp-shop-web-541-toggle" });
+  await ui.press({ key: "pp-shop-web-541-k0-e2" });
+  expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
+  await ui.press({ key: "pp-shop-web-541-k0-e3" });
+  expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
+  await ui.press({ key: "pp-shop-web-541-k0-e4" });
+  expect(ran.at(-1)).toEqual(["xdg-open", `${DIR}/shot.png`]);
 });
