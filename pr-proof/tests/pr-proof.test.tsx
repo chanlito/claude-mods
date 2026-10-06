@@ -449,3 +449,21 @@ test("only the newest mention of a PR draws its button", async ($, on) => {
   expect(await first.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
   expect(await second.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
 });
+
+for (const [columns, width] of [[undefined, 44], [100, 46], [200, 80]] as const) {
+  test(`${columns ? `a ${columns}` : "an unmeasured"}-column transcript draws pictures ${width} cells wide`, async ($, on) => {
+    const { ran } = stage($, on, { KITTY_WINDOW_ID: "1" });
+    const ui = await $.ui.mount({
+      plugin: "pr-proof",
+      surface: "terminal",
+      component: "AssistantMessage",
+      requestId: `wide-${columns ?? 0}`,
+      props: { text: "web#541 is ready.", isFirstOfReply: true },
+      ...(columns ? { viewport: { columns, rows: 50 } } : {}),
+    });
+    await ui.press({ key: "pp-shop-web-541-toggle" });
+    const made = ran.find((argv) => argv[0] === "sh");
+    expect(made?.[5]).toBe(String(width));
+    expect(await ui.find({ key: "img-pp-shop-web-541-c0-after" })).toBeDefined();
+  });
+}
