@@ -153,7 +153,8 @@ async function openFile($: EngineInterface, path: string): Promise<void> {
       await $.process.run(["explorer.exe", await windowsPath($, path)]);
       return;
     case "windows":
-      await $.process.run(["cmd.exe", "/c", "start", "", path]);
+      // Never cmd.exe: it parses the path again, so `&` in a folder name runs.
+      await $.process.run(["explorer.exe", path]);
       return;
     case "mac":
       await $.process.run(["open", path]);
@@ -164,12 +165,27 @@ async function openFile($: EngineInterface, path: string): Promise<void> {
   }
 }
 
+/**
+ * What Open hands to the desktop's default app. A record is only data, and an
+ * executable (`.command`, `.bat`, `.desktop`, `.app`) would run when opened,
+ * so anything else is revealed instead.
+ */
+const VIEWABLE = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "bmp",
+  "mp4", "webm", "mov",
+  "json", "txt", "md", "log", "csv",
+]);
+
+const isViewable = (path: string) =>
+  VIEWABLE.has(path.split(".").at(-1)?.toLowerCase() ?? "");
+
 async function act(
   $: EngineInterface,
-  verb: "open" | "reveal",
+  asked: "open" | "reveal",
   path: string,
 ): Promise<string> {
   const name = path.split("/").at(-1) ?? path;
+  const verb = asked === "open" && !isViewable(path) ? "reveal" : asked;
   try {
     if (verb === "open") {
       await openFile($, path);
@@ -228,7 +244,8 @@ async function scan($: EngineInterface, root: string): Promise<ProofRecord[]> {
   const records: ProofRecord[] = [];
   const repos = await $.fs.list(root).catch(() => []);
   for (const repo of repos) {
-    if (repo.kind !== "dir" || repo.name.startsWith(".")) continue;
+    // The folder name ends up in paths handed to the OS: plain names only.
+    if (repo.kind !== "dir" || !/^[\w][\w.-]*$/.test(repo.name)) continue;
     const prs = await $.fs.list(`${root}/${repo.name}`).catch(() => []);
     for (const pr of prs) {
       if (pr.kind !== "dir" || !/^\d+$/.test(pr.name)) continue;

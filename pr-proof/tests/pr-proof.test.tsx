@@ -25,7 +25,7 @@ const RECORD = {
     { title: "Settings line", after: "settings-after.png" },
   ],
   checks: [
-    { claim: "Offline upgrade keeps every row", where: "Tablet", result: "pass", evidence: ["counts.json"] },
+    { claim: "Offline upgrade keeps every row", where: "Tablet", result: "pass", evidence: ["counts.json", "run.command"] },
     { claim: "Killed upgrade recovers", where: "Tablet", result: "fail" },
     { claim: "Every crash state", where: "Unit tests", result: "pass" },
   ],
@@ -105,11 +105,12 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") 
   const toasts: string[] = [];
   const entry = (name: string) => ({ name, kind: "dir" as const, size: 0, mtimeMs: 0, isLink: false });
   on("fs.list", (_$, e) => {
-    if (e.path === ROOT) return { value: [entry("shop-web")] };
+    if (e.path === ROOT) return { value: [entry("shop-web"), entry("a&calc")] };
+    if (e.path === `${ROOT}/a&calc`) return { value: [entry("541")] };
     if (e.path === `${ROOT}/shop-web`) return { value: [entry("541")] };
     return { value: [] };
   });
-  on("fs.read", (_$, e) => ({ value: e.path === `${DIR}/proof.json` ? JSON.stringify(RECORD) : "" }));
+  on("fs.read", (_$, e) => ({ value: e.path.endsWith("/541/proof.json") ? JSON.stringify(RECORD) : "" }));
   on("process.run", (_$, e) => {
     ran.push([...e.argv]);
     if (e.argv[0] === "sh")
@@ -231,4 +232,26 @@ test("the system prompt names the records folder from the setting", { options: {
   });
   expect(sections.at(-1)?.id).toBe("pr-proof:root");
   expect(sections.at(-1)?.text).toMatch(/go in \/home\/me\/proofs\/<repo>\/<pr>\//);
+});
+
+test("Open reveals a file that would run instead of opening it", async ($, on) => {
+  const { ran } = stage($, on, {}, "Darwin");
+  const ui = await reply($, "web#541 is ready.");
+  await ui.press({ key: "pp-shop-web-541-toggle" });
+  await ui.press({ key: "pp-shop-web-541-k0-e0" });
+  expect(ran.at(-1)).toEqual(["open", `${DIR}/counts.json`]);
+  await ui.press({ key: "pp-shop-web-541-k0-e1" });
+  expect(ran.at(-1)).toEqual(["open", "-R", `${DIR}/run.command`]);
+});
+
+test("a records folder whose name is not a plain name is skipped", async ($, on) => {
+  stage($, on, {});
+  const out = await $.command.run({
+    command: "proof",
+    args: "",
+    origin: { kind: "composer" },
+    presentation: { isFullscreen: false, columns: 120 },
+  });
+  expect(out.text).toMatch(/shop-web#541/);
+  expect(out.text).not.toMatch(/calc/);
 });
