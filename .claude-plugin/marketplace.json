@@ -9,6 +9,11 @@
       "name": "image-peek",
       "source": "./image-peek",
       "description": "Previews pasted images and images Claude sends, with Open and Reveal buttons"
+    },
+    {
+      "name": "pr-proof",
+      "source": "./pr-proof",
+      "description": "Reveals the proof behind a PR under the reply that names it: checks, outlined before/after screenshots, what was not checked"
     }
   ]
 }
