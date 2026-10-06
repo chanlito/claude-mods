@@ -5,7 +5,9 @@ import { expect, mock, test } from "claude-code/testing";
 import { toBase64 } from "../hooks/preview";
 import {
   countsOf,
+  findRecordPaths,
   findRefs,
+  findUrlRefs,
   parseRecord,
   resolveRefs,
   safeName,
@@ -105,7 +107,8 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") 
   const toasts: string[] = [];
   const entry = (name: string) => ({ name, kind: "dir" as const, size: 0, mtimeMs: 0, isLink: false });
   on("fs.list", (_$, e) => {
-    if (e.path === ROOT) return { value: [entry("shop-web"), entry("a&calc")] };
+    if (e.path === ROOT) return { value: [entry("shop-web"), entry("a&calc"), entry("api")] };
+    if (e.path === `${ROOT}/api`) return { value: [entry("12")] };
     if (e.path === `${ROOT}/a&calc`) return { value: [entry("541")] };
     if (e.path === `${ROOT}/shop-web`) return { value: [entry("541")] };
     return { value: [] };
@@ -121,6 +124,8 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") 
               : PNG,
         },
       };
+    if (e.path === `${ROOT}/api/12/proof.json`)
+      return { value: JSON.stringify({ repo: "acme/api", title: "Rate limits", checks: [{ claim: "c", result: "pass" }] }) };
     return { value: e.path.endsWith("/541/proof.json") ? JSON.stringify(RECORD) : "" };
   });
   on("fs.stat", (_$, e) => ({
@@ -299,4 +304,103 @@ test("Open reveals a file that resolves outside the record, or whose bytes are a
   expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
   await ui.press({ key: "pp-shop-web-541-k0-e6" });
   expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
+});
+
+const PR_URL = "https://github.com/acme/shop-web/pull/541";
+
+test("a command's PR URLs and a call's record paths are refs", () => {
+  expect(findUrlRefs(`Creating pull request\n${PR_URL}\n`)).toEqual([{ name: "shop-web", pr: 541 }]);
+  // Only URLs: "#7" in a command's chatter is not a PR it made.
+  expect(findUrlRefs("closes #7, see web#541")).toEqual([]);
+  expect(
+    findRecordPaths(`mkdir -p ~/pr-proof/shop-web/541 && cp a ${ROOT}/api/12/x.png; ${ROOT}/api/12b`, ROOT, "/home/me"),
+  ).toEqual([
+    { name: "shop-web", pr: 541 },
+    { name: "api", pr: 12 },
+  ]);
+});
+
+const created = (tool_use_id: string) => ({
+  tool_use_id,
+  tool: "Bash",
+  input: { command: "gh pr create --fill" },
+  isRunning: false,
+  isErrored: false,
+  isInterrupted: false,
+  output: { stdout: `${PR_URL}\n`, stderr: "" },
+});
+
+test("Claude Code's \"Created PR\" row gets the button, from the URL the command printed", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: "tu-1",
+    props: created("tu-1"),
+  });
+  expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  await ui.press({ key: "pp-shop-web-541-toggle" });
+  expect(await ui.find({ key: "pp-shop-web-541-details" })).toBeDefined();
+});
+
+test("a folded group of calls gets the button for the PR one of them created", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolGroup",
+    requestId: "tg-1",
+    props: {
+      calls: [
+        { tool: "Read", input: { file_path: "/x" }, isRunning: false, isErrored: false, isInterrupted: false, output: { stdout: "https://github.com/acme/api/pull/12" } },
+        created("tu-2"),
+      ],
+      isActive: false,
+      isExpanded: false,
+    },
+  });
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  // A Read's output is file text, not a command's: its URL is no PR made here.
+  expect(await ui.find({ key: "pp-api-12-toggle" })).toBe(undefined);
+});
+
+test("a shell row that printed no PR is left alone", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: "tu-3",
+    props: { ...created("tu-3"), output: { stdout: "ok\n", stderr: "" } },
+  });
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+});
+
+const listProof = ($: Engine) =>
+  $.command.run({
+    command: "proof",
+    args: "",
+    origin: { kind: "composer" },
+    presentation: { isFullscreen: false, columns: 120 },
+  });
+
+test("/proof lists this session's PRs first: one it created, one whose record it wrote", async ($, on) => {
+  stage($, on, {});
+  on("tool.call", (_$, e) =>
+    e.tool === "Bash" && /gh pr create/.test(String((e as { command?: unknown }).command))
+      ? { result: { stdout: `${PR_URL}\n`, stderr: "" } }
+      : { result: { stdout: "", stderr: "" } },
+  );
+  expect((await listProof($)).text).toMatch(/^None from this session yet\.\n\nOther sessions:\n/);
+
+  await $.tool.call({ tool: "Bash", command: "gh pr create --fill" });
+  let text = (await listProof($)).text ?? "";
+  expect(text).toMatch(/^This session:\nshop-web#541 .*\n\nOther sessions:\napi#12 /);
+
+  await $.tool.call({ tool: "Bash", command: `cat > ~/pr-proof/api/12/proof.json <<'EOF'` });
+  text = (await listProof($)).text ?? "";
+  expect(text).toMatch(/^This session:\nshop-web#541 .*\napi#12 [^\n]*$/);
+  expect(text).not.toMatch(/Other sessions/);
 });

@@ -1,6 +1,6 @@
 # pr-proof
 
-Shows what an agent verified on a PR, under the reply that names it. When Claude writes "shop-web#541 is ready for review", pr-proof adds **▸ Reveal proof**. Press it to see:
+Shows what an agent verified on a PR, under the reply that names it. When Claude writes "shop-web#541 is ready for review", pr-proof adds **▸ Reveal proof**. The same button goes under Claude Code's own "Created PR #541" line, found from the URL `gh pr create` printed. Press it to see:
 
 - each change on screen as a before and after picture, outlined in red where it changed;
 - every check with where it ran and whether it passed, failed or was skipped;
@@ -15,7 +15,7 @@ pr-proof reads `<root>/<repo>/<pr>/proof.json` and the files beside it, `<root>`
 
 The plugin ships the `record-proof` skill, which tells Claude how to write the record and outline its screenshots while it verifies. The record's shape is in [`skills/record-proof/SKILL.md`](./skills/record-proof/SKILL.md).
 
-`/proof` lists the records; `/proof repo#541` reveals one's folder.
+`/proof` lists the records, this session's first (a PR a command in it printed, or a record a call in it wrote or named by path), then the others; `/proof repo#541` reveals one's folder.
 
 ## Settings
 

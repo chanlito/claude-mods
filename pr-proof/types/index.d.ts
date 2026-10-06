@@ -6,6 +6,8 @@ declare module 'claude-code' {
     'pr-proof': {
       /** The reveals the person opened, `<record folder>@<message requestId>`. */
       open: string[]
+      /** The PRs this session touched, as `name#541`: one a command printed, or a record it wrote. */
+      seen: string[]
     }
   }
 }

@@ -1,15 +1,21 @@
 import { atom, read, update } from "claude-code";
-import type { EngineInterface, Register, RenderInput } from "claude-code";
+import type { EngineInterface, Register, RenderElement, RenderInput } from "claude-code";
 
 import type { Preview } from "../types";
 import { decodePreview, fromBase64 } from "./preview";
 import {
   countsOf,
+  findRecordPaths,
   findRefs,
+  findUrlRefs,
   labelOf,
+  outputText,
   parseRecord,
+  parseRefKey,
+  refKey,
   resolveRefs,
   type ProofRecord,
+  type Ref,
   type Result,
 } from "./record";
 
@@ -22,6 +28,7 @@ const INDEX_TTL_MS = 10_000;
 const MAX_PER_REPLY = 3;
 
 const open = atom({ plugin: "pr-proof", key: "open" } as const, []);
+const seen = atom({ plugin: "pr-proof", key: "seen" } as const, []);
 
 /**
  * `blocks` prints `<w> <h>` then a half-block-sized PPM as base64; `image`
@@ -461,9 +468,61 @@ async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: s
   );
 }
 
+/** The row as the engine draws it, with a proof button under it per record its refs find. */
+async function withProof(
+  $: EngineInterface,
+  e: RenderInput,
+  engineRow: () => Promise<RenderElement>,
+  refs: Ref[],
+  settings: { root: string; preview: string },
+): Promise<RenderElement> {
+  if (refs.length === 0) return engineRow();
+  const root = await rootOf($, settings.root);
+  const found = resolveRefs(refs, await recordsIn($, root), await repoHere($)).slice(0, MAX_PER_REPLY);
+  if (found.length === 0) return engineRow();
+
+  const { Box, Text, Button } = $.ui.resolve(e);
+  const own = await engineRow();
+  const opened = await read($, open);
+  const mode = await modeFor($, settings.preview);
+
+  const blocks = [];
+  for (const r of found) {
+    const id = `${r.dir}@${e.requestId}`;
+    const isOpen = opened.includes(id);
+    const key = `pp-${r.repoDir}-${r.pr}`;
+    blocks.push(
+      <Box key={key} flexDirection="column" paddingLeft={2}>
+        <Box flexDirection="row" gap={1}>
+          <Button
+            key={`${key}-toggle`}
+            label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"}
+            onPress={() =>
+              void update($, open, (list) =>
+                list.includes(id) ? list.filter((x) => x !== id) : [...list, id].slice(-40),
+              )
+            }
+          />
+          <Text dimColor>
+            {labelOf(r)} · {countsOf(r)}
+          </Text>
+        </Box>
+        {isOpen && (await details($, e, r, key, mode))}
+      </Box>,
+    );
+  }
+  return (
+    <Box flexDirection="column">
+      {own}
+      {blocks}
+    </Box>
+  );
+}
+
 export const register: Register = (on, options) => {
   const rootSetting = String(options.root ?? "~/pr-proof");
   const previewSetting = String(options.preview ?? "auto");
+  const settings = { root: rootSetting, preview: previewSetting };
 
   // The records folder is a setting, so the agent writing records reads it
   // from here rather than from the skill's default.
@@ -504,55 +563,67 @@ export const register: Register = (on, options) => {
     }
     if (records.length === 0)
       return { text: `No records under ${root}. Each one is <root>/<repo>/<pr>/proof.json.` };
+    const line = (r: ProofRecord) => `${labelOf(r)}  ${countsOf(r)}${r.title ? `  ${r.title}` : ""}`;
+    const refs = (await read($, seen)).map(parseRefKey).filter((r): r is Ref => !!r);
+    const mine = resolveRefs(refs, records, await repoHere($));
+    const rest = records.filter((r) => !mine.includes(r));
+    if (mine.length === 0)
+      return { text: ["None from this session yet.", "", "Other sessions:", ...rest.map(line)].join("\n") };
     return {
-      text: records
-        .map((r) => `${labelOf(r)}  ${countsOf(r)}${r.title ? `  ${r.title}` : ""}`)
-        .join("\n"),
+      text: [
+        "This session:",
+        ...mine.map(line),
+        ...(rest.length ? ["", "Other sessions:", ...rest.map(line)] : []),
+      ].join("\n"),
     };
   });
 
-  on("ui.render", { component: "AssistantMessage" }, async ($, e, next) => {
-    const refs = findRefs(e.props.text);
-    if (refs.length === 0) return next(e);
-    const root = await rootOf($, rootSetting);
-    const found = resolveRefs(refs, await recordsIn($, root), await repoHere($)).slice(0, MAX_PER_REPLY);
-    if (found.length === 0) return next(e);
+  on("ui.render", { component: "AssistantMessage" }, async ($, e, next) =>
+    withProof($, e, () => next(e), findRefs(e.props.text), settings),
+  );
 
-    const { Box, Text, Button } = $.ui.resolve(e);
-    const own = await next(e);
-    const opened = await read($, open);
-    const mode = await modeFor($, previewSetting);
+  // Claude Code's own line for a shell call, "Created PR #549", is a ToolUse
+  // row, or a ToolGroup when it folded the call with others: the PR is in
+  // the URL the command printed.
+  on("ui.render", { component: "ToolUse" }, async ($, e, next) =>
+    withProof($, e, () => next(e), findUrlRefs(outputText(e.props.tool, e.props.output)), settings),
+  );
 
-    const blocks = [];
-    for (const r of found) {
-      const id = `${r.dir}@${e.requestId}`;
-      const isOpen = opened.includes(id);
-      const key = `pp-${r.repoDir}-${r.pr}`;
-      blocks.push(
-        <Box key={key} flexDirection="column" paddingLeft={2}>
-          <Box flexDirection="row" gap={1}>
-            <Button
-              key={`${key}-toggle`}
-              label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"}
-              onPress={() =>
-                void update($, open, (list) =>
-                  list.includes(id) ? list.filter((x) => x !== id) : [...list, id].slice(-40),
-                )
-              }
-            />
-            <Text dimColor>
-              {labelOf(r)} · {countsOf(r)}
-            </Text>
-          </Box>
-          {isOpen && (await details($, e, r, key, mode))}
-        </Box>,
-      );
+  on("ui.render", { component: "ToolGroup" }, async ($, e, next) =>
+    withProof(
+      $,
+      e,
+      () => next(e),
+      findUrlRefs(e.props.calls.map((c) => outputText(c.tool, c.output)).join("\n")),
+      settings,
+    ),
+  );
+
+  // What this session touched: a PR a command printed, a record a tool wrote or
+  // named by its path. /proof lists these first.
+  on("tool.call", async ($, e, next) => {
+    const ran = await next(e);
+    try {
+      const root = await rootOf($, rootSetting);
+      const home = (await $.env.get("HOME")) ?? "";
+      // The fields that name what a call touched, not a Write's content, which
+      // may mention any record.
+      const args = e as unknown as Record<string, unknown>;
+      const input = ["command", "file_path", "path"]
+        .map((k) => args[k])
+        .filter((v): v is string => typeof v === "string")
+        .join("\n");
+      const output = ran.deny === undefined ? outputText(e.tool, ran.result) : "";
+      const refs = [...findRecordPaths(input, root, home), ...findUrlRefs(output)];
+      if (refs.length > 0) {
+        await update($, seen, (list) => {
+          const keys = refs.map(refKey).filter((k) => !list.includes(k));
+          return keys.length ? [...list, ...keys].slice(-100) : list;
+        });
+      }
+    } catch {
+      // Bookkeeping only: never fail the call over it.
     }
-    return (
-      <Box flexDirection="column">
-        {own}
-        {blocks}
-      </Box>
-    );
-  });
+    return ran;
+  }).catch(($, e, next) => next(e));
 };
