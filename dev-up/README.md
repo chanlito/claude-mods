@@ -21,7 +21,49 @@ Servers start detached (`setsid`), with a log and a pid file under
 reload of the mod, and every session in the stack's folder sees the same ones.
 The stack's state shows in the status line and is refreshed every 30 seconds.
 
-## A stack file
+## Installation
+
+```
+/plugin install dev-up --marketplace chanlito/claude-mods
+```
+
+Answer `y` to add the marketplace, then choose a scope (user is the usual one).
+The mod is active right away. It does nothing until a stack file covers the
+folder you're in, so the next step is writing one (see Config).
+
+To run it from a clone while developing, without installing:
+
+```
+claude --plugin-dir ~/code/claude-mods/dev-up
+```
+
+or list the folder in `CLAUDE_CODE_PLUGIN_DIRS` under `env` in
+`~/.claude/settings.json`. Don't do both: an installed copy and a folder copy
+would load the mod twice.
+
+It needs `sh`, plus `docker` for compose services and `curl` for `report:`.
+It finds ports with `ss` (Linux, WSL), or with `lsof` where `ss` is missing
+(macOS).
+
+## Config
+
+### The stacks folder
+
+Stack files are read from `~/.claude/dev-stacks/` by default. To use another
+folder, change the mod's `stacks` option in `/config`, or set it in
+`~/.claude/settings.json`:
+
+```json
+{
+  "pluginConfigs": {
+    "dev-up@claude-mods": { "options": { "stacks": "~/dotfiles/dev-stacks" } }
+  }
+}
+```
+
+The key is `dev-up` for a copy loaded with `--plugin-dir`.
+
+### A stack file
 
 One file per stack in `~/.claude/dev-stacks/<name>.yml`. A session uses the
 stack whose `root:` holds its folder (the deepest one wins).
@@ -93,13 +135,54 @@ Claude gets the same commands as the `dev_up` tool. Its description tells
 Claude to use the tool rather than starting servers from Bash, where they
 would die with the turn.
 
-## Install
+## FAQ
 
-```
-/plugin install dev-up --marketplace chanlito/claude-mods
-```
+**Why doesn't `/dev-up` wait until everything is up?**
+A pass that waits would hold the turn for minutes while containers turn
+healthy and emulators boot. A pass returns right away and says what it skipped.
+Run `/dev-up` again when you're ready. Claude does the same with the `dev_up`
+tool, calling `status` again after a pause.
 
-The stacks folder is the `stacks` option (`~/.claude/dev-stacks` by default).
+**Do the servers stop when I close Claude?**
+No. They run in a session of their own and keep going until you run
+`/dev-up stop`, or until they exit by themselves. Any Claude session in the
+stack's folder sees them, and a pass leaves them alone.
+
+**Where is a server's output?**
+In `~/.cache/dev-up/<stack>/<service>.log`. `/dev-up logs <service> 100` shows
+the end of it. For a compose service, it shows `docker compose logs`.
+
+**I started a server myself in a terminal. Will `/dev-up` start a second one?**
+No. A server counts as up when its port listens, whoever started it. `stop` and
+`restart` stop whatever holds that port, though, so they reach your terminal's
+server too.
+
+**It says "No stack covers …"**
+No stack file's `root:` holds the session's folder. Check the `root:`, and that
+the file is in the stacks folder and ends in `.yml` or `.yaml`. A file that
+fails to load is named at the end of the message, with what is wrong in it.
+
+**`npm` or another command is "not found" in the log.**
+Commands run with the environment Claude Code was started with. A Claude
+started from your shell has your PATH; one started some other way may not. Put
+what the command needs in `run:` itself, for example
+`run: . ~/.nvm/nvm.sh && npm run dev`, or give the full path.
+
+**I already have a `/dev-up` skill or command.**
+The mod leaves the name to it and says so once. The `dev_up` tool and the status
+line still work. Rename or remove the other one to get the command.
+
+**Why YAML without anchors or multi-line strings?**
+A mod runs without npm packages, so it carries its own small parser. It reads
+what a stack file needs: maps, lists, `[a, b]`, `{ k: v }`, quotes and comments.
+Anything else is an error that names the line.
+
+**When does the status line update?**
+Every 30 seconds, and after each `/dev-up` or `dev_up` call. Check scripts run
+only during a pass, so a check service shows what it said last time.
+
+**Does it run on Windows?**
+Under WSL, yes. On native Windows, no: it needs `sh`.
 
 ## Develop
 
