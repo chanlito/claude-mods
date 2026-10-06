@@ -25,6 +25,8 @@ export type Service = {
   creates?: string;
   /** check: the script, absolute. */
   check?: string;
+  /** Set when `/dev-up use` moved this service onto another checkout: that checkout's folder name. */
+  servedFrom?: string;
 };
 
 export type Stack = {
@@ -219,10 +221,46 @@ export function plan(stack: Stack, seen: Observed): Step[] {
   return steps;
 }
 
+/** Which checkout serves a service instead of its own: service name → folder, absolute. */
+export type Overrides = Record<string, string>;
+
+/** `path` moved from one checkout's top folder to another's, or undefined when it is outside the first. */
+export function rebase(path: string, fromTop: string, toTop: string): string | undefined {
+  if (path === fromTop) return toTop;
+  return path.startsWith(`${fromTop}/`) ? toTop + path.slice(fromTop.length) : undefined;
+}
+
+/** The other checkout's folder name: `dir` with the trailing folders it shares with `own` taken off. */
+function checkoutName(own: string, dir: string): string {
+  const a = own.split("/").filter(Boolean);
+  const b = dir.split("/").filter(Boolean);
+  while (a.length > 1 && b.length > 1 && a.at(-1) === b.at(-1)) a.pop(), b.pop();
+  return b.at(-1) ?? dir;
+}
+
+/** The stack with each overridden server or task run from its other checkout. */
+export function applyOverrides(stack: Stack, overrides: Overrides): Stack {
+  return {
+    ...stack,
+    services: stack.services.map((s) => {
+      const dir = overrides[s.name];
+      if (!dir || dir === s.dir || (s.kind !== "server" && s.kind !== "task")) return s;
+      return {
+        ...s,
+        dir,
+        servedFrom: checkoutName(s.dir, dir),
+        ...(s.creates ? { creates: rebase(s.creates, s.dir, dir) ?? s.creates } : {}),
+      };
+    }),
+  };
+}
+
 const GLYPH: Record<State, string> = { up: "●", starting: "◐", down: "○", broken: "✕" };
 
 export function statusLine(stack: Stack, seen: Observed): string {
-  const parts = stack.services.map((s) => `${GLYPH[seen[s.name]?.state ?? "down"]} ${s.name}`);
+  const parts = stack.services.map(
+    (s) => `${GLYPH[seen[s.name]?.state ?? "down"]} ${s.name}${s.servedFrom ? `@${s.servedFrom}` : ""}`,
+  );
   return `${stack.name}  ${parts.join("  ")}`;
 }
 

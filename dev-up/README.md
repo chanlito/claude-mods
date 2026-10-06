@@ -128,6 +128,21 @@ comments.
 | `/dev-up restart <svc> [args]` | stop and start one service; anything after its name is added to its command this once, so `restart metro -- --clear` runs `npm start -- --clear`. A compose service is recreated |
 | `/dev-up stop [<svc>]` | stop one service, or every server and task (containers stay up) |
 | `/dev-up logs <svc> [n]` | the last `n` lines of its log (40) |
+| `/dev-up use <dir>` | serve the servers and tasks of `<dir>`'s repo from that worktree |
+| `/dev-up restore [<svc>]` | serve them from their own folders again |
+
+### Worktrees
+
+`/dev-up use ~/code/shop-wt/feat` finds the servers and tasks whose folders
+are in the same git repo as that worktree. It restarts them from the matching
+folder in the worktree and keeps serving them from there on every later pass,
+until `/dev-up restore`. A server that waits on something not up yet starts on
+the next pass instead. Containers and check scripts stay where they are.
+
+There is one port per server, so a move applies to every session, not just
+yours. The status line shows it: `web@feat` means `web` is served from the
+`feat` worktree. If the worktree is removed, its services go back to their own
+folders on the next pass.
 
 Stopping goes by process group and then by port, so a watcher's child that
 outlived its parent and still holds the port is stopped too.
@@ -177,6 +192,11 @@ line still work. Rename or remove the other one to get the command.
 A mod runs without npm packages, so it carries its own small parser. It reads
 what a stack file needs: maps, lists, `[a, b]`, `{ k: v }`, quotes and comments.
 Anything else is an error that names the line.
+
+**Can two sessions each serve their own worktree?**
+Not on the same port. `use` moves a server for everyone, so one session's move
+replaces another's. Run one branch at a time, or give the second checkout its
+own stack file with other ports.
 
 **When does the status line update?**
 Every 30 seconds, and after each `/dev-up` or `dev_up` call. Check scripts run

@@ -192,18 +192,35 @@ const answer = (exitCode: number, stdout: string, stderr = "") => ({
 /** The shop stack on disk, the session in its web folder, Docker and the shell answered from memory. */
 function stage(
   on: On,
-  machine: { compose: string; ports?: number[]; pids?: string[]; files?: string[]; cwd?: string; mtimes?: Record<string, number> },
+  machine: {
+    compose: string;
+    ports?: number[];
+    pids?: string[];
+    files?: string[];
+    cwd?: string;
+    mtimes?: Record<string, number>;
+    /** `git rev-parse` per folder: [top, common git dir]. */
+    git?: Record<string, [string, string]>;
+  },
 ) {
   mock.env(on, { HOME });
   mock.clock(on);
   const ran: { argv: string[]; cwd?: string }[] = [];
   const statuses: (string | undefined)[] = [];
   const files = new Set([`${STACKS}/shop.yml`, ...(machine.files ?? [])]);
+  const written = new Map<string, string>();
   on("session.cwd", () => ({ value: machine.cwd ?? `${ROOT}/web` }));
   on("fs.list", (_$, e) =>
     ({ value: e.path === STACKS ? [{ name: "shop.yml", kind: "file" as const, size: 1, mtimeMs: 0, isLink: false }] : [] }),
   );
-  on("fs.read", (_$, e) => ({ value: e.path === `${STACKS}/shop.yml` ? SHOP : "" }));
+  on("fs.read", (_$, e) => {
+    if (e.path === `${STACKS}/shop.yml`) return { value: SHOP };
+    return { value: written.get(e.path) ?? "" };
+  });
+  on("fs.write", (_$, e) => {
+    written.set(e.path, e.text);
+    return { value: undefined };
+  });
   on("fs.exists", (_$, e) => ({ value: files.has(e.path) }));
   on("fs.stat", (_$, e) => {
     const mtimeMs = machine.mtimes?.[e.path];
@@ -217,6 +234,10 @@ function stage(
     if (cmd === "sh" && e.argv[2]?.includes("PORT"))
       return answer(0, [...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
     if (cmd === "curl") return answer(0, "200");
+    if (cmd === "git" && e.argv[3] === "rev-parse") {
+      const hit = machine.git?.[e.argv[2]!];
+      return hit ? answer(0, `${hit[0]}\n${hit[1]}\n`) : answer(128, "", "fatal: not a git repository");
+    }
     if (cmd === `${STACKS}/shop/seed.sh`) return answer(0, "UP      seeded\nrows 12\n");
     return answer(0, "");
   });
@@ -224,7 +245,7 @@ function stage(
     statuses.push(e.text);
     return { value: undefined };
   });
-  return { ran, statuses };
+  return { ran, statuses, written };
 }
 
 const HEALTHY = [
@@ -331,4 +352,66 @@ test("a lockfile newer than the last install: warn and do not start", async ($, 
   const out = await devUp($);
   expect(out.text).toMatch(/^WARN {4}web: package-lock\.json in .*\/web changed since the last npm install: install there first/m);
   expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[4])).toEqual([ROOT]);
+});
+
+/* ---- worktrees ---- */
+
+const WT = `${HOME}/code/shop-wt/feat`;
+const GIT: Record<string, [string, string]> = {
+  [WT]: [WT, `${ROOT}/.git`],
+  [`${ROOT}/web`]: [ROOT, `${ROOT}/.git`],
+  [ROOT]: [ROOT, `${ROOT}/.git`],
+};
+
+test("use <worktree> moves the servers of that repo onto it, for every later pass", async ($, on) => {
+  const { ran, written } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    pids: ["PID web alive", "PID worker alive"],
+    files: [`${ROOT}/web/node_modules`, WT, `${WT}/web`],
+    git: GIT,
+  });
+  const out = await devUp($, `use ${WT}`);
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/use.json`)!)).toEqual({
+    web: `${WT}/web`,
+    codegen: `${WT}/web`,
+    worker: WT,
+  });
+  const starts = ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => `${r.argv[4]} ${r.argv[5]}`);
+  expect(starts).toEqual([`${WT}/web pnpm dev`, `${WT} pnpm worker # not a comment`]);
+  expect(out.text).toMatch(/^SKIP {4}codegen: now from .*shop-wt\/feat\/web; waits for web, so the next \/dev-up starts it/m);
+  expect(ran.filter((r) => r.argv[2]?.includes("holders()")).length).toBe(3);
+  expect(out.text).toMatch(/^STARTED web: from .*shop-wt\/feat\/web/m);
+  expect(out.text).toMatch(/◐ web@feat {2}○ codegen@feat {2}◐ worker@feat/);
+
+  const status = await devUp($, "status");
+  expect(status.text).toMatch(/^up {7}web {2}from .*shop-wt\/feat\/web/m);
+});
+
+test("restore puts them back in their own folders", async ($, on) => {
+  const { ran, written } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    files: [`${ROOT}/web/node_modules`, WT, `${WT}/web`],
+    git: GIT,
+  });
+  await devUp($, `use ${WT}`);
+  ran.length = 0;
+  const out = await devUp($, "restore web");
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/use.json`)!)).toEqual({ codegen: `${WT}/web`, worker: WT });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[4])).toEqual([`${ROOT}/web`]);
+  expect(out.text).toMatch(/^STARTED web: from .*\/code\/shop\/web /m);
+});
+
+test("use refuses a folder that is no checkout, or of another repo", async ($, on) => {
+  stage(on, { compose: HEALTHY, git: { ...GIT, "/tmp/other": ["/tmp/other", "/tmp/other/.git"] } });
+  expect((await devUp($, "use /tmp/nowhere")).text).toBe("/tmp/nowhere is not a git checkout.");
+  expect((await devUp($, "use /tmp/other")).text).toMatch(/No server or task in shop runs from \/tmp\/other's repo/);
+});
+
+test("a worktree that was removed drops out of the overrides", async ($, on) => {
+  const { written } = stage(on, { compose: HEALTHY, files: [WT, `${WT}/web`], git: GIT });
+  await devUp($, `use ${WT}`);
+  written.set(`${HOME}/.cache/dev-up/shop/use.json`, JSON.stringify({ web: "/gone/web" }));
+  expect((await devUp($, "status")).text).not.toMatch(/from \/gone/);
 });

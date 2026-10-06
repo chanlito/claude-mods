@@ -1,16 +1,20 @@
 import type { EngineInterface, Register } from "claude-code";
 
 import {
+  applyOverrides,
   composeState,
   formatStep,
   parseLine,
   parseStack,
   pickStack,
   plan,
+  rebase,
+  resolvePath,
   stateOfLines,
   statusLine,
   StackError,
   type Observed,
+  type Overrides,
   type Prefix,
   type Seen,
   type Service,
@@ -86,6 +90,8 @@ const HELP = [
   "/dev-up restart <svc> [args]  stop and start one service; args are added to its command this once",
   "/dev-up stop [<svc>]          stop one service, or every server and task",
   "/dev-up logs <svc> [n]        the last n lines of its log (40)",
+  "/dev-up use <dir>             serve the servers of <dir>'s repo from that worktree",
+  "/dev-up restore [<svc>]       serve them from their own folders again",
 ].join("\n");
 
 type Run = { exitCode: number; stdout: string; stderr: string };
@@ -106,7 +112,11 @@ async function homeOf($: EngineInterface) {
 
 const expandHome = (path: string, home: string) => path.replace(/^~(?=$|\/)/, home).replace(/\/+$/, "");
 
-type Found = { stack?: Stack; errors: string[]; folder: string; cwd: string };
+/**
+ * `stack` is what runs: `base` with `/dev-up use` overrides applied. `base` is
+ * the stack file as written, for use and restore.
+ */
+type Found = { stack?: Stack; base?: Stack; overrides: Overrides; errors: string[]; folder: string; cwd: string };
 
 async function findStack($: EngineInterface, folderSetting: string): Promise<Found> {
   const home = await homeOf($);
@@ -124,10 +134,36 @@ async function findStack($: EngineInterface, folderSetting: string): Promise<Fou
       errors.push(`${file}: ${error instanceof StackError || error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return { stack: pickStack(stacks, cwd), errors, folder, cwd };
+  const base = pickStack(stacks, cwd);
+  if (!base) return { errors, folder, cwd, overrides: {} };
+  const overrides = await readOverrides($, home, base);
+  return { stack: applyOverrides(base, overrides), base, overrides, errors, folder, cwd };
 }
 
 const stateDir = (home: string, stack: Stack) => `${home}/.cache/dev-up/${stack.name}`;
+const overridesFile = (home: string, stack: Stack) => `${stateDir(home, stack)}/use.json`;
+
+/** The `/dev-up use` overrides on disk; one whose folder is gone (a removed worktree) is dropped. */
+async function readOverrides($: EngineInterface, home: string, stack: Stack): Promise<Overrides> {
+  let saved: unknown;
+  try {
+    saved = JSON.parse(await $.fs.read(overridesFile(home, stack)));
+  } catch {
+    return {};
+  }
+  const out: Overrides = {};
+  if (!saved || typeof saved !== "object") return out;
+  for (const [name, dir] of Object.entries(saved as Record<string, unknown>))
+    if (typeof dir === "string" && stack.services.some((s) => s.name === name) && (await $.fs.exists(dir))) out[name] = dir;
+  return out;
+}
+
+/** A folder's checkout: its top folder and the git folder all its worktrees share. */
+async function checkoutOf($: EngineInterface, dir: string): Promise<{ top: string; common: string } | undefined> {
+  const r = await run($, ["git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], { timeoutMs: 10_000 });
+  const [top, common] = r.stdout.trim().split("\n");
+  return r.exitCode === 0 && top && common ? { top, common } : undefined;
+}
 const logOf = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.log`;
 const pidOf = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.pid`;
 
@@ -321,7 +357,10 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
     const seen = await observe($, stack);
     $.ui.status(statusLine(stack, seen));
     return stack.services
-      .map((s) => `${(seen[s.name]?.state ?? "down").padEnd(9)}${s.name}${seen[s.name]?.why ? `  ${seen[s.name]!.why}` : ""}`)
+      .map(
+        (s) =>
+          `${(seen[s.name]?.state ?? "down").padEnd(9)}${s.name}${s.servedFrom ? `  from ${s.dir}` : ""}${seen[s.name]?.why ? `  ${seen[s.name]!.why}` : ""}`,
+      )
       .join("\n");
   }
   if (verb === "help") return HELP;
@@ -351,6 +390,56 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
     }
     await stop($, stack, s);
     return `Stopped ${s.name}.`;
+  }
+  if (verb === "use" || verb === "restore") {
+    const base = found.base!;
+    const next: Overrides = { ...found.overrides };
+    if (verb === "use") {
+      if (!name) return "Name the worktree: /dev-up use <dir>.";
+      const target = resolvePath(name, found.cwd, home);
+      const into = await checkoutOf($, target);
+      if (!into) return `${target} is not a git checkout.`;
+      let matched = 0;
+      for (const s of base.services) {
+        if (s.kind !== "server" && s.kind !== "task") continue;
+        const own = await checkoutOf($, s.dir);
+        if (!own || own.common !== into.common) continue;
+        const dir = rebase(s.dir, own.top, into.top);
+        if (!dir) continue;
+        matched++;
+        if (dir === s.dir) delete next[s.name];
+        else next[s.name] = dir;
+      }
+      if (!matched) return `No server or task in ${base.name} runs from ${into.top}'s repo.`;
+    } else if (name) {
+      if (!(name in next)) return `${name} is served from its own folder already.`;
+      delete next[name];
+    } else for (const k of Object.keys(next)) delete next[k];
+
+    await $.fs.write(overridesFile(home, base), `${JSON.stringify(next, null, 2)}\n`);
+    const after = applyOverrides(base, next);
+    const seen = await observe($, after);
+    const lines: string[] = [];
+    for (const s of after.services) {
+      const was = stack.services.find((x) => x.name === s.name)!;
+      if (was.dir === s.dir) continue;
+      await stop($, stack, was);
+      const waiting = s.after.filter((d) => seen[d]?.state !== "up");
+      if (waiting.length) {
+        lines.push(formatStep({ prefix: "SKIP", text: `${s.name}: now from ${s.dir}; waits for ${waiting.join(", ")}, so the next /dev-up starts it` }));
+        continue;
+      }
+      const r = await start($, after, s);
+      lines.push(
+        r.exitCode === 0
+          ? formatStep({ prefix: "STARTED", text: `${s.name}: from ${s.dir}  (log ${logOf(home, after, s)})` })
+          : formatStep({ prefix: "WARN", text: `${s.name}: stopped, but it did not start from ${s.dir}: ${lastLine(r.stderr)}` }),
+      );
+      seen[s.name] = { state: "starting" };
+    }
+    if (!lines.length) lines.push(verb === "use" ? "Already served from there." : "Nothing was moved.");
+    $.ui.status(statusLine(after, seen));
+    return [...lines, "", statusLine(after, seen)].join("\n");
   }
   if (verb === "restart") {
     const s = serviceOf(stack, name);
@@ -400,7 +489,7 @@ export const register: Register = (on, options) => {
       await $.command.register({
         name: "dev-up",
         description: "Bring up this folder's dev stack: start what is down, skip what waits",
-        argumentHint: "[status|restart <svc> [args]|stop [<svc>]|logs <svc>|--dry-run]",
+        argumentHint: "[status|restart <svc> [args]|stop [<svc>]|logs <svc>|use <dir>|restore|--dry-run]",
       });
     } catch (error) {
       commandTaken = true;
@@ -412,13 +501,15 @@ export const register: Register = (on, options) => {
         "The dev stack for the session's folder, from ~/.claude/dev-stacks/<name>.yml. " +
         "action=up runs one pass and returns at once: it starts what is down and skips what waits on something still starting. " +
         "Call up again later to finish a pass that skipped things; never start these servers from Bash, where they die with the turn. " +
-        "status reports each service; restart and stop take a service; logs prints its last lines.",
+        "status reports each service; restart and stop take a service; logs prints its last lines. " +
+        "use serves the servers of a worktree's repo from that worktree (dir), for every session; restore puts them back.",
       inputSchema: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["up", "status", "restart", "stop", "logs", "dry-run"] },
+          action: { type: "string", enum: ["up", "status", "restart", "stop", "logs", "dry-run", "use", "restore"] },
           service: { type: "string", description: "The service, for restart, stop and logs." },
           lines: { type: "number", description: "For logs: how many lines (40)." },
+          dir: { type: "string", description: "For use: the worktree to serve its repo's servers from." },
           args: { type: "string", description: "For restart: added to the service's command for this start only, e.g. \"-- --clear\"." },
         },
         required: ["action"],
@@ -434,9 +525,10 @@ export const register: Register = (on, options) => {
   );
 
   on("tool.call", { tool: "mcp__dev-up__dev_up" }, async ($, e) => {
-    const input = e as unknown as { action?: string; service?: string; lines?: number; args?: string };
+    const input = e as unknown as { action?: string; service?: string; lines?: number; args?: string; dir?: string };
     const extra = input.action === "restart" ? (input.args ?? "") : input.lines ? String(input.lines) : "";
-    const args = [input.action ?? "up", input.service ?? "", extra].join(" ");
+    const target = input.action === "use" ? (input.dir ?? input.service ?? "") : (input.service ?? "");
+    const args = [input.action ?? "up", target, extra].join(" ");
     return { result: await dispatch($, folderSetting, args) };
   });
 };
