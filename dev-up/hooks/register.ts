@@ -78,12 +78,12 @@ exit 0
 `;
 
 const HELP = [
-  "/dev-up                 one pass: start what is down, skip what waits",
-  "/dev-up --dry-run       print what a pass would do",
-  "/dev-up status          each service's state",
-  "/dev-up restart <svc>   stop and start one service",
-  "/dev-up stop [<svc>]    stop one service, or every server and task",
-  "/dev-up logs <svc> [n]  the last n lines of its log (40)",
+  "/dev-up                       one pass: start what is down, skip what waits",
+  "/dev-up --dry-run             print what a pass would do",
+  "/dev-up status                each service's state",
+  "/dev-up restart <svc> [args]  stop and start one service; args are added to its command this once",
+  "/dev-up stop [<svc>]          stop one service, or every server and task",
+  "/dev-up logs <svc> [n]        the last n lines of its log (40)",
 ].join("\n");
 
 type Run = { exitCode: number; stdout: string; stderr: string };
@@ -191,9 +191,11 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
   return seen;
 }
 
-async function start($: EngineInterface, stack: Stack, s: Service): Promise<Run> {
+/** `extra` is added to the command for this start only (`-- --clear`). */
+async function start($: EngineInterface, stack: Stack, s: Service, extra = ""): Promise<Run> {
   const home = await homeOf($);
-  return run($, ["sh", "-c", START, "sh", s.dir, s.kind === "task" ? s.task! : s.run!, logOf(home, stack, s), pidOf(home, stack, s)]);
+  const command = [s.kind === "task" ? s.task! : s.run!, extra].filter(Boolean).join(" ");
+  return run($, ["sh", "-c", START, "sh", s.dir, command, logOf(home, stack, s), pidOf(home, stack, s)]);
 }
 
 async function stop($: EngineInterface, stack: Stack, s: Service): Promise<Run> {
@@ -287,7 +289,10 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
   if (!stack)
     return `No stack covers ${found.cwd}. A stack is ${found.folder}/<name>.yml with a root: that holds this folder.${broken}`;
 
-  const [verb = "", name, extra] = args.trim().split(/\s+/).filter(Boolean);
+  const words = args.trim().split(/\s+/).filter(Boolean);
+  const [verb = "", name, extra] = words;
+  /** Everything after the service's name, for restart. */
+  const rest = words.slice(2).join(" ");
   const home = await homeOf($);
 
   if (verb === "" || verb === "up" || verb === "--dry-run" || verb === "dry-run") {
@@ -335,17 +340,21 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
     const s = serviceOf(stack, name);
     if (typeof s === "string") return s;
     if (s.kind === "compose") {
+      if (rest) return `${s.name} is containers; restart takes no extra arguments for it.`;
       const r = await run($, ["docker", "compose", "up", "-d", "--force-recreate"], { cwd: s.dir, timeoutMs: 300_000 });
       return r.exitCode === 0 ? `Recreated ${s.name}'s containers. Run /dev-up once they are healthy.` : `Recreate failed: ${lastLine(r.stderr)}`;
     }
-    if (s.kind === "check") return (await runCheck($, stack, s, false)).join("\n");
+    if (s.kind === "check") {
+      if (rest) return `${s.name} is a check script; restart takes no extra arguments for it.`;
+      return (await runCheck($, stack, s, false)).join("\n");
+    }
     const seen = await observe($, stack);
     const waiting = s.after.filter((d) => seen[d]?.state !== "up");
     if (waiting.length) return `${s.name} waits for ${waiting.join(", ")}, which is not up. Run /dev-up first.`;
     await stop($, stack, s);
-    const r = await start($, stack, s);
+    const r = await start($, stack, s, rest);
     return r.exitCode === 0
-      ? `Restarted ${s.name}  (log ${logOf(home, stack, s)})`
+      ? `Restarted ${s.name}${rest ? ` with ${rest}` : ""}  (log ${logOf(home, stack, s)})`
       : `Stopped ${s.name}, but it did not start: ${lastLine(r.stderr)}`;
   }
   return `Unknown: ${verb}\n\n${HELP}`;
@@ -375,7 +384,7 @@ export const register: Register = (on, options) => {
       await $.command.register({
         name: "dev-up",
         description: "Bring up this folder's dev stack: start what is down, skip what waits",
-        argumentHint: "[status|restart <svc>|stop [<svc>]|logs <svc>|--dry-run]",
+        argumentHint: "[status|restart <svc> [args]|stop [<svc>]|logs <svc>|--dry-run]",
       });
     } catch (error) {
       commandTaken = true;
@@ -394,6 +403,7 @@ export const register: Register = (on, options) => {
           action: { type: "string", enum: ["up", "status", "restart", "stop", "logs", "dry-run"] },
           service: { type: "string", description: "The service, for restart, stop and logs." },
           lines: { type: "number", description: "For logs: how many lines (40)." },
+          args: { type: "string", description: "For restart: added to the service's command for this start only, e.g. \"-- --clear\"." },
         },
         required: ["action"],
       },
@@ -408,8 +418,9 @@ export const register: Register = (on, options) => {
   );
 
   on("tool.call", { tool: "mcp__dev-up__dev_up" }, async ($, e) => {
-    const input = e as unknown as { action?: string; service?: string; lines?: number };
-    const args = [input.action ?? "up", input.service ?? "", input.lines ? String(input.lines) : ""].join(" ");
+    const input = e as unknown as { action?: string; service?: string; lines?: number; args?: string };
+    const extra = input.action === "restart" ? (input.args ?? "") : input.lines ? String(input.lines) : "";
+    const args = [input.action ?? "up", input.service ?? "", extra].join(" ");
     return { result: await dispatch($, folderSetting, args) };
   });
 };

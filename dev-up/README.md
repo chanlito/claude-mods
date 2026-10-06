@@ -124,7 +124,7 @@ comments.
 | `/dev-up` | one pass |
 | `/dev-up --dry-run` | what a pass would do; check scripts get `--dry-run` |
 | `/dev-up status` | each service's state and why |
-| `/dev-up restart <svc>` | stop and start one service; a compose service is recreated |
+| `/dev-up restart <svc> [args]` | stop and start one service; anything after its name is added to its command this once, so `restart metro -- --clear` runs `npm start -- --clear`. A compose service is recreated |
 | `/dev-up stop [<svc>]` | stop one service, or every server and task (containers stay up) |
 | `/dev-up logs <svc> [n]` | the last `n` lines of its log (40) |
 

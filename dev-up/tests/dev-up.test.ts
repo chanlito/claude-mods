@@ -286,3 +286,21 @@ test("the model's tool answers the same as the command", async ($, on) => {
   const out = await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "status" });
   expect(String(out.result)).toMatch(/^up {7}db {2}postgres healthy, mail up\nup {7}web/m);
 });
+
+test("restart adds its extra arguments to the command, this once", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  const out = await devUp($, "restart web -- --clear");
+  const stops = ran.filter((r) => r.argv[2]?.includes("holders()"));
+  const starts = ran.filter((r) => r.argv[2]?.includes("setsid"));
+  expect(stops.map((r) => r.argv.slice(4, 6))).toEqual([[`${HOME}/.cache/dev-up/shop/web.pid`, "3000"]]);
+  expect(starts.map((r) => r.argv[5])).toEqual(["pnpm dev -- --clear"]);
+  expect(out.text).toMatch(/^Restarted web with -- --clear {2}\(log /);
+});
+
+test("the tool passes restart's args through; containers take none", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "restart", service: "web", args: "-- --clear" });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual(["pnpm dev -- --clear"]);
+  const out = await devUp($, "restart db -- --pull");
+  expect(out.text).toMatch(/db is containers; restart takes no extra arguments/);
+});
