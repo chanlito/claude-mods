@@ -11,6 +11,11 @@
       "description": "Previews pasted images and images Claude sends, with Open and Reveal buttons"
     },
     {
+      "name": "pr-proof",
+      "source": "./pr-proof",
+      "description": "Reveals the proof behind a PR under the reply that names it: checks, outlined before/after screenshots, what was not checked"
+    },
+    {
       "name": "dev-up",
       "source": "./dev-up",
       "description": "Brings up a folder's dev stack from a YAML stack file, one pass at a time: docker compose, detached dev servers, tasks and check scripts, with the stack in the status line"
