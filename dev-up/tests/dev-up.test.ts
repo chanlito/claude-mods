@@ -199,8 +199,8 @@ function stage(
     files?: string[];
     cwd?: string;
     mtimes?: Record<string, number>;
-    /** `git rev-parse` per folder: [top, common git dir]. */
-    git?: Record<string, [string, string]>;
+    /** Per folder git is run in: its top folder and the worktrees `git worktree list` gives. */
+    git?: Record<string, [string, string[]]>;
   },
 ) {
   mock.env(on, { HOME });
@@ -209,6 +209,7 @@ function stage(
   const statuses: (string | undefined)[] = [];
   const files = new Set([`${STACKS}/shop.yml`, ...(machine.files ?? [])]);
   const written = new Map<string, string>();
+  const gitIn: string[] = [];
   on("session.cwd", () => ({ value: machine.cwd ?? `${ROOT}/web` }));
   on("fs.list", (_$, e) =>
     ({ value: e.path === STACKS ? [{ name: "shop.yml", kind: "file" as const, size: 1, mtimeMs: 0, isLink: false }] : [] }),
@@ -234,9 +235,12 @@ function stage(
     if (cmd === "sh" && e.argv[2]?.includes("PORT"))
       return answer(0, [...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
     if (cmd === "curl") return answer(0, "200");
-    if (cmd === "git" && e.argv[3] === "rev-parse") {
+    if (cmd === "git") {
+      gitIn.push(e.argv[2]!);
       const hit = machine.git?.[e.argv[2]!];
-      return hit ? answer(0, `${hit[0]}\n${hit[1]}\n`) : answer(128, "", "fatal: not a git repository");
+      if (!hit) return answer(128, "", "fatal: not a git repository");
+      if (e.argv[3] === "rev-parse") return answer(0, `${hit[0]}\n`);
+      if (e.argv[3] === "worktree") return answer(0, hit[1].map((w) => `worktree ${w}\nHEAD abc\n`).join("\n"));
     }
     if (cmd === `${STACKS}/shop/seed.sh`) return answer(0, "UP      seeded\nrows 12\n");
     return answer(0, "");
@@ -245,7 +249,7 @@ function stage(
     statuses.push(e.text);
     return { value: undefined };
   });
-  return { ran, statuses, written };
+  return { ran, statuses, written, gitIn };
 }
 
 const HEALTHY = [
@@ -357,10 +361,9 @@ test("a lockfile newer than the last install: warn and do not start", async ($, 
 /* ---- worktrees ---- */
 
 const WT = `${HOME}/code/shop-wt/feat`;
-const GIT: Record<string, [string, string]> = {
-  [WT]: [WT, `${ROOT}/.git`],
-  [`${ROOT}/web`]: [ROOT, `${ROOT}/.git`],
-  [ROOT]: [ROOT, `${ROOT}/.git`],
+const GIT: Record<string, [string, string[]]> = {
+  [`${ROOT}/web`]: [ROOT, [ROOT, WT]],
+  [ROOT]: [ROOT, [ROOT, WT]],
 };
 
 test("use <worktree> moves the servers of that repo onto it, for every later pass", async ($, on) => {
@@ -403,10 +406,12 @@ test("restore puts them back in their own folders", async ($, on) => {
   expect(out.text).toMatch(/^STARTED web: from .*\/code\/shop\/web /m);
 });
 
-test("use refuses a folder that is no checkout, or of another repo", async ($, on) => {
-  stage(on, { compose: HEALTHY, git: { ...GIT, "/tmp/other": ["/tmp/other", "/tmp/other/.git"] } });
-  expect((await devUp($, "use /tmp/nowhere")).text).toBe("/tmp/nowhere is not a git checkout.");
-  expect((await devUp($, "use /tmp/other")).text).toMatch(/No server or task in shop runs from \/tmp\/other's repo/);
+test("use takes only a worktree git lists for a service's repo, and never runs git in the folder it is given", async ($, on) => {
+  const { gitIn, written } = stage(on, { compose: HEALTHY, git: GIT });
+  const out = await devUp($, "use /tmp/crafted");
+  expect(out.text).toMatch(/\/tmp\/crafted is not a worktree of any repo a server or task in shop runs from/);
+  expect(gitIn.every((dir) => dir === ROOT || dir === `${ROOT}/web`)).toBe(true);
+  expect(written.size).toBe(0);
 });
 
 test("a worktree that was removed drops out of the overrides", async ($, on) => {

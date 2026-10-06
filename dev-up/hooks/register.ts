@@ -158,11 +158,21 @@ async function readOverrides($: EngineInterface, home: string, stack: Stack): Pr
   return out;
 }
 
-/** A folder's checkout: its top folder and the git folder all its worktrees share. */
-async function checkoutOf($: EngineInterface, dir: string): Promise<{ top: string; common: string } | undefined> {
-  const r = await run($, ["git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], { timeoutMs: 10_000 });
-  const [top, common] = r.stdout.trim().split("\n");
-  return r.exitCode === 0 && top && common ? { top, common } : undefined;
+/**
+ * A service's checkout: its top folder and the worktrees git lists for its
+ * repo. Git runs only in the service's own folder, from the stack file, never
+ * in a folder a prompt or the model named: a repo's config can make git run
+ * commands.
+ */
+async function checkoutOf($: EngineInterface, dir: string): Promise<{ top: string; worktrees: string[] } | undefined> {
+  const top = await run($, ["git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeoutMs: 10_000 });
+  const list = await run($, ["git", "-C", dir, "worktree", "list", "--porcelain"], { timeoutMs: 10_000 });
+  if (top.exitCode !== 0 || list.exitCode !== 0 || !top.stdout.trim()) return undefined;
+  const worktrees = list.stdout
+    .split("\n")
+    .filter((l) => l.startsWith("worktree "))
+    .map((l) => l.slice("worktree ".length).replace(/\/+$/, ""));
+  return { top: top.stdout.trim(), worktrees };
 }
 const logOf = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.log`;
 const pidOf = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.pid`;
@@ -397,20 +407,22 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
     if (verb === "use") {
       if (!name) return "Name the worktree: /dev-up use <dir>.";
       const target = resolvePath(name, found.cwd, home);
-      const into = await checkoutOf($, target);
-      if (!into) return `${target} is not a git checkout.`;
       let matched = 0;
       for (const s of base.services) {
         if (s.kind !== "server" && s.kind !== "task") continue;
         const own = await checkoutOf($, s.dir);
-        if (!own || own.common !== into.common) continue;
-        const dir = rebase(s.dir, own.top, into.top);
+        // Only a worktree git lists for this service's repo, the deepest that holds the target.
+        const into = own?.worktrees
+          .filter((w) => target === w || target.startsWith(`${w}/`))
+          .sort((a, b) => b.length - a.length)[0];
+        if (!own || !into) continue;
+        const dir = rebase(s.dir, own.top, into);
         if (!dir) continue;
         matched++;
         if (dir === s.dir) delete next[s.name];
         else next[s.name] = dir;
       }
-      if (!matched) return `No server or task in ${base.name} runs from ${into.top}'s repo.`;
+      if (!matched) return `${target} is not a worktree of any repo a server or task in ${base.name} runs from (git worktree list).`;
     } else if (name) {
       if (!(name in next)) return `${name} is served from its own folder already.`;
       delete next[name];
