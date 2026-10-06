@@ -165,71 +165,82 @@ async function openFile($: EngineInterface, path: string): Promise<void> {
   }
 }
 
+/** The file's own extension, from its name alone. */
+const extensionOf = (path: string) => {
+  const name = path.split("/").at(-1) ?? "";
+  return name.includes(".") ? (name.split(".").at(-1)?.toLowerCase() ?? "") : "";
+};
+
+const ascii = (s: string) => [...s].map((c) => c.charCodeAt(0));
+
 /**
- * What Open hands to the desktop's default app. A record is only data, and an
- * executable (`.command`, `.bat`, `.desktop`, `.app`) would run when opened,
- * so anything else is revealed instead.
+ * What Open hands to the desktop's default app, and the bytes each must start
+ * with: `[offset, bytes]` pairs that all have to match. A record is only data,
+ * and an executable (`.command`, `.bat`, `.desktop`, `.app`) would run when
+ * opened, so anything else is revealed instead.
  */
-const VIEWABLE = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "bmp",
-  "mp4", "webm", "mov",
-  "json", "txt", "md", "log", "csv",
-]);
-
-const isViewable = (path: string) =>
-  VIEWABLE.has(path.split(".").at(-1)?.toLowerCase() ?? "");
-
-/** File signatures a picture or video starts with, as bytes at an offset. */
-const SIGNATURES: [number, number[]][] = [
-  [0, [0x89, 0x50, 0x4e, 0x47]], // PNG
-  [0, [0xff, 0xd8, 0xff]], // JPEG
-  [0, [0x47, 0x49, 0x46, 0x38]], // GIF8
-  [8, [0x57, 0x45, 0x42, 0x50]], // WEBP (after RIFF....)
-  [0, [0x42, 0x4d]], // BMP
-  [4, [0x66, 0x74, 0x79, 0x70]], // ftyp: MP4, MOV
-  [0, [0x1a, 0x45, 0xdf, 0xa3]], // WebM
-];
+const PICTURES: Record<string, [number, number[]][][]> = {
+  png: [[[0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]]]],
+  jpg: [[[0, [0xff, 0xd8, 0xff]]]],
+  jpeg: [[[0, [0xff, 0xd8, 0xff]]]],
+  gif: [[[0, ascii("GIF87a")]], [[0, ascii("GIF89a")]]],
+  webp: [[[0, ascii("RIFF")], [8, ascii("WEBP")]]],
+  bmp: [[[0, ascii("BM")]]],
+  mp4: [[[4, ascii("ftyp")]]],
+  mov: [[[4, ascii("ftyp")]]],
+  webm: [[[0, [0x1a, 0x45, 0xdf, 0xa3]]]],
+};
 const TEXT = new Set(["json", "txt", "md", "log", "csv"]);
 
-/** Whether the bytes are what the name says: a known picture or video, or plain text. */
-function looksLike(path: string, bytes: Uint8Array): boolean {
-  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+/** Whether the bytes are what this extension says: its own signature, or plain text. */
+function looksLike(extension: string, bytes: Uint8Array): boolean {
   if (TEXT.has(extension)) {
     const head = bytes.subarray(0, 4096);
     // A script or a desktop entry renamed to .txt is not text to open.
     const start = new TextDecoder().decode(head.subarray(0, 64));
     return !head.includes(0) && !start.startsWith("#!") && !start.includes("[Desktop Entry]");
   }
-  return SIGNATURES.some(([at, sig]) => sig.every((b, i) => bytes[at + i] === b));
+  const forms = PICTURES[extension] ?? [];
+  return forms.some((form) => form.every(([at, sig]) => sig.every((b, i) => bytes[at + i] === b)));
 }
 
 /**
- * Open only a regular file (never a link, which could lead to an app) that a
- * viewer would show. Linux's xdg-open can go by the content, not the name, so
- * there the bytes must match too; a file over the 4 MiB read limit is revealed.
+ * The real path to open, or undefined to reveal instead. Open takes only a
+ * regular file, not a link, that resolves inside the record's own folder (no
+ * linked folder above it leads out) under a viewable extension; on Linux,
+ * where xdg-open can go by content, its bytes must match that extension too.
+ * The opener gets the resolved path that was checked, never the given one.
  */
-async function canOpen($: EngineInterface, path: string): Promise<boolean> {
-  if (!isViewable(path)) return false;
-  const stat = await $.fs.stat(path).catch(() => undefined);
-  if (!stat || stat.kind !== "file" || stat.isLink) return false;
+async function openable($: EngineInterface, path: string, within: string): Promise<string | undefined> {
+  const extension = extensionOf(path);
+  if (!TEXT.has(extension) && !PICTURES[extension]) return undefined;
+  const stat = await $.fs.stat(path, { resolve: true }).catch(() => undefined);
+  const home = await $.fs.stat(within, { resolve: true }).catch(() => undefined);
+  const real = stat?.realPath;
+  const root = home?.realPath;
+  if (!stat || stat.kind !== "file" || stat.isLink || !real || !root) return undefined;
+  if (!real.startsWith(`${root.replace(/\/+$/, "")}/`) || extensionOf(real) !== extension) return undefined;
   os ??= detectOs($);
-  if ((await os) !== "linux") return true;
-  const read = await $.fs.read(path, { as: "bytes" }).catch(() => undefined);
-  return read ? looksLike(path, fromBase64(read.base64)) : false;
+  if ((await os) !== "linux") return real;
+  const read = await $.fs.read(real, { as: "bytes" }).catch(() => undefined);
+  return read && looksLike(extension, fromBase64(read.base64)) ? real : undefined;
 }
 
+/** Opens a record's file (when it is safe to) or reveals it, and says which. */
 async function act(
   $: EngineInterface,
   asked: "open" | "reveal",
   path: string,
+  within: string,
 ): Promise<string> {
   const name = path.split("/").at(-1) ?? path;
-  const verb = asked === "open" && !(await canOpen($, path)) ? "reveal" : asked;
+  const real = asked === "open" ? await openable($, path, within) : undefined;
+  const verb = real ? "open" : "reveal";
   try {
-    if (verb === "open") {
-      await openFile($, path);
+    if (real) {
+      await openFile($, real);
       $.ui.toast(`Opened ${name}`);
-      return `Opened ${path}.`;
+      return `Opened ${real}.`;
     }
     const app = await reveal($, path);
     $.ui.toast(`Revealed ${name} in ${app}`);
@@ -335,6 +346,7 @@ async function picture(
   key: string,
   label: string,
   path: string,
+  within: string,
   mode: Mode,
 ) {
   const { Box, Text, Button } = $.ui.resolve(e);
@@ -367,8 +379,8 @@ async function picture(
       )}
       <Box flexDirection="row" gap={1}>
         <Text dimColor>{label}</Text>
-        <Button key={`open-${key}`} label="Open" onPress={() => void act($, "open", path)} />
-        <Button key={`reveal-${key}`} label="Reveal" onPress={() => void act($, "reveal", path)} />
+        <Button key={`open-${key}`} label="Open" onPress={() => void act($, "open", path, within)} />
+        <Button key={`reveal-${key}`} label="Reveal" onPress={() => void act($, "reveal", path, within)} />
       </Box>
     </Box>
   );
@@ -383,10 +395,10 @@ async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: s
   for (const [i, c] of r.changes.entries()) {
     const sides = [];
     if (c.before)
-      sides.push(await picture($, e, `${id}-c${i}-before`, "Before", `${r.dir}/${c.before}`, mode));
+      sides.push(await picture($, e, `${id}-c${i}-before`, "Before", `${r.dir}/${c.before}`, r.dir, mode));
     else sides.push(<Text key={`${id}-c${i}-nobefore`} dimColor>(no before shot)</Text>);
     if (c.after)
-      sides.push(await picture($, e, `${id}-c${i}-after`, "After", `${r.dir}/${c.after}`, mode));
+      sides.push(await picture($, e, `${id}-c${i}-after`, "After", `${r.dir}/${c.after}`, r.dir, mode));
     changes.push(
       <Box key={`${id}-c${i}`} flexDirection="column">
         <Text bold>{c.title}</Text>
@@ -419,7 +431,7 @@ async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: s
                   label={name}
                   plain
                   dimColor
-                  onPress={() => void act($, "open", `${r.dir}/${name}`)}
+                  onPress={() => void act($, "open", `${r.dir}/${name}`, r.dir)}
                 />
               ))}
             </Box>
@@ -441,7 +453,7 @@ async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: s
         <Button
           key={`${id}-folder`}
           label="Reveal folder"
-          onPress={() => void act($, "reveal", `${r.dir}/proof.json`)}
+          onPress={() => void act($, "reveal", `${r.dir}/proof.json`, r.dir)}
         />
         {r.url && <Link href={r.url} label="Open the PR" />}
       </Box>
@@ -487,7 +499,7 @@ export const register: Register = (on, options) => {
     if (asked) {
       const hit = resolveRefs(findRefs(asked.includes("#") ? asked : `#${asked}`), records, await repoHere($))[0];
       if (!hit) return { text: `No record for ${asked} under ${root}.` };
-      return { text: await act($, "reveal", `${hit.dir}/proof.json`) };
+      return { text: await act($, "reveal", `${hit.dir}/proof.json`, hit.dir) };
     }
     if (records.length === 0)
       return { text: `No records under ${root}. Each one is <root>/<repo>/<pr>/proof.json.` };

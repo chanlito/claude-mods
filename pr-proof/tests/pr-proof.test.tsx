@@ -25,7 +25,7 @@ const RECORD = {
     { title: "Settings line", after: "settings-after.png" },
   ],
   checks: [
-    { claim: "Offline upgrade keeps every row", where: "Tablet", result: "pass", evidence: ["counts.json", "run.command", "linked.png", "fake.png", "shot.png"] },
+    { claim: "Offline upgrade keeps every row", where: "Tablet", result: "pass", evidence: ["counts.json", "run.command", "linked.png", "fake.png", "shot.png", "escape.png", "jpeg-named.png"] },
     { claim: "Killed upgrade recovers", where: "Tablet", result: "fail" },
     { claim: "Every crash state", where: "Unit tests", result: "pass" },
   ],
@@ -112,11 +112,26 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") 
   });
   on("fs.read", (_$, e) => {
     if (e.as === "bytes")
-      return { value: { base64: e.path.endsWith("fake.png") ? toBase64(new TextEncoder().encode("#!/bin/sh\nid\n")) : PNG } };
+      return {
+        value: {
+          base64: e.path.endsWith("fake.png")
+            ? toBase64(new TextEncoder().encode("#!/bin/sh\nid\n"))
+            : e.path.endsWith("jpeg-named.png")
+              ? toBase64(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]))
+              : PNG,
+        },
+      };
     return { value: e.path.endsWith("/541/proof.json") ? JSON.stringify(RECORD) : "" };
   });
   on("fs.stat", (_$, e) => ({
-    value: { kind: "file" as const, size: 10, mtimeMs: 0, isLink: e.path.endsWith("linked.png") },
+    value: {
+      kind: e.path === DIR ? ("dir" as const) : ("file" as const),
+      size: 10,
+      mtimeMs: 0,
+      isLink: e.path.endsWith("linked.png"),
+      // A linked folder above escape.png leads out of the record's folder.
+      realPath: e.path.endsWith("escape.png") ? "/etc/elsewhere/escape.png" : e.path,
+    },
   }));
   on("process.run", (_$, e) => {
     ran.push([...e.argv]);
@@ -273,4 +288,15 @@ test("Open reveals a link, and on Linux a file whose bytes are not what its name
   expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
   await ui.press({ key: "pp-shop-web-541-k0-e4" });
   expect(ran.at(-1)).toEqual(["xdg-open", `${DIR}/shot.png`]);
+});
+
+test("Open reveals a file that resolves outside the record, or whose bytes are another format", async ($, on) => {
+  const { ran } = stage($, on, {});
+  const ui = await reply($, "web#541 is ready.");
+  await ui.press({ key: "pp-shop-web-541-toggle" });
+  await ui.press({ key: "pp-shop-web-541-k0-e5" });
+  expect(ran.some((argv) => argv[0] === "xdg-open" && argv[1]?.includes("elsewhere"))).toBe(false);
+  expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
+  await ui.press({ key: "pp-shop-web-541-k0-e6" });
+  expect(ran.at(-1)?.[0]).not.toBe("xdg-open");
 });
