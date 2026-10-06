@@ -405,7 +405,7 @@ test("/proof lists this session's PRs first: one it created, one whose record it
   expect(text).not.toMatch(/Other sessions/);
 });
 
-test("a gh pr edit row prints the PR's URL too, and gets no button", async ($, on) => {
+test("a gh pr edit row gets the button too, from the URL it printed", async ($, on) => {
   stage($, on, {});
   const ui = await $.ui.mount({
     plugin: "pr-proof",
@@ -415,6 +415,18 @@ test("a gh pr edit row prints the PR's URL too, and gets no button", async ($, o
     props: { ...created("tu-edit"), input: { command: "gh pr edit 541 --body-file b.md" } },
   });
   expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+});
+
+test("a shell row that is not a gh pr call gets no button, whatever URL it printed", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: "tu-cat",
+    props: { ...created("tu-cat"), input: { command: "cat notes.md" } },
+  });
   expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
 });
 

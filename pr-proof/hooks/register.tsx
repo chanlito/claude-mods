@@ -5,10 +5,10 @@ import type { Preview } from "../types";
 import { decodePreview, fromBase64 } from "./preview";
 import {
   countsOf,
-  createdText,
   findRecordPaths,
   findRefs,
   findUrlRefs,
+  ghPrText,
   labelOf,
   outputText,
   parseRecord,
@@ -609,12 +609,11 @@ export const register: Register = (on, options) => {
     withProof($, e, () => next(e), findRefs(e.props.text), settings),
   );
 
-  // Claude Code's own line for `gh pr create`, "Created PR #549", is a ToolUse
-  // row, or a ToolGroup when it folded the call with others: the PR is in
-  // the URL the command printed. Other gh commands print PR URLs too, and get
-  // no button: a reply naming the PR carries it.
+  // Claude Code's own line for a `gh pr` call, "Created PR #549" or "Edited
+  // PR #549", is a ToolUse row, or a ToolGroup when it folded the call with
+  // others: the PR is in the URL the command printed.
   on("ui.render", { component: "ToolUse" }, async ($, e, next) =>
-    withProof($, e, () => next(e), findUrlRefs(createdText(e.props.tool, e.props.input, e.props.output)), settings),
+    withProof($, e, () => next(e), findUrlRefs(ghPrText(e.props.tool, e.props.input, e.props.output)), settings),
   );
 
   on("ui.render", { component: "ToolGroup" }, async ($, e, next) =>
@@ -622,7 +621,7 @@ export const register: Register = (on, options) => {
       $,
       e,
       () => next(e),
-      findUrlRefs(e.props.calls.map((c) => createdText(c.tool, c.input, c.output)).join("\n")),
+      findUrlRefs(e.props.calls.map((c) => ghPrText(c.tool, c.input, c.output)).join("\n")),
       settings,
     ),
   );

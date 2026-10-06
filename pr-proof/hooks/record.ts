@@ -166,12 +166,13 @@ export function outputText(tool: string, output: unknown): string {
 }
 
 /**
- * What a `gh pr create` call printed, its new PR's URL among it; "" for any
- * other call, so a `gh pr edit` or `gh pr view` row draws no button of its own.
+ * What a `gh pr` call printed (create, edit, comment, ready: each prints the
+ * PR's URL); "" for any other call, so a file's text or an API's JSON that
+ * happens to hold a PR link draws no button.
  */
-export function createdText(tool: string, input: unknown, output: unknown): string {
+export function ghPrText(tool: string, input: unknown, output: unknown): string {
   const command = (input as { command?: unknown } | null)?.command;
-  if (typeof command !== "string" || !/\bgh\s+pr\s+create\b/.test(command)) return "";
+  if (typeof command !== "string" || !/\bgh\s+pr\s+\w/.test(command)) return "";
   return outputText(tool, output);
 }
 
