@@ -457,3 +457,17 @@ test("with no stack for the folder, the hint line is left alone", async ($, on) 
   expect(await ui.find({ type: "Text", text: "? for shortcuts" })).toBeDefined();
   expect(await ui.find({ key: "dev-up" })).toBe(undefined);
 });
+
+test("loading clears the plain status line older versions pinned", async ($, on) => {
+  stage(on, { compose: HEALTHY });
+  const cleared: (string | undefined)[] = [];
+  on("ui.status", (_$, e) => {
+    cleared.push(e.text);
+    return { value: undefined };
+  });
+  on("command.register", () => ({ value: { command: "dev-up" } }));
+  on("tool.register", () => ({ value: { tool: "mcp__dev-up__dev_up" } }));
+  on("session.start", () => ({ cwd: ROOT }));
+  await $.session.start({ cwd: ROOT } as never);
+  expect(cleared).toContain(undefined);
+});

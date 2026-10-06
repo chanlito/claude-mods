@@ -509,6 +509,8 @@ async function refresh($: EngineInterface, folderSetting: string) {
   try {
     const { stack } = await findStack($, folderSetting);
     await show($, stack, stack ? await observe($, stack) : {});
+  } catch {
+    // A refresh in the background has nobody to tell; the next one, or a command, tries again.
   } finally {
     refreshing = false;
   }
@@ -521,6 +523,8 @@ export const register: Register = (on, options) => {
   let commandTaken = false;
 
   on("session.start", async ($, e, next) => {
+    // Versions before the dots pinned a plain status line; a pinned line outlives a reload.
+    $.ui.status(undefined);
     try {
       await $.command.register({
         name: "dev-up",
