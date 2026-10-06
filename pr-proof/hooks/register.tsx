@@ -8,6 +8,7 @@ import {
   findRecordPaths,
   findRefs,
   findUrlRefs,
+  ghPrText,
   labelOf,
   outputText,
   parseRecord,
@@ -295,6 +296,22 @@ function thumb($: EngineInterface, path: string, mode: Mode): Promise<Thumb> {
   return made;
 }
 
+/**
+ * Each record's mentions, in the order they were first drawn: a reply, or a
+ * `gh pr create` row. Only the newest draws the button, so one PR shows one.
+ * A module variable, not `$.state`: a render hook cannot write, and a reload
+ * draws every row again, which rebuilds it in the same order.
+ */
+const mentions = new Map<string, string[]>();
+
+/** Whether `instance` is now the record's newest mention, and whether it just displaced an older one. */
+function newestMention(dir: string, instance: string): { isNewest: boolean; displaced: boolean } {
+  const list = mentions.get(dir) ?? [];
+  const isNew = !list.includes(instance);
+  if (isNew) mentions.set(dir, [...list, instance].slice(-200));
+  return { isNewest: (mentions.get(dir) ?? []).at(-1) === instance, displaced: isNew && list.length > 0 };
+}
+
 let index: { at: number; root: string; records: Promise<ProofRecord[]> } | undefined;
 
 async function scan($: EngineInterface, root: string): Promise<ProofRecord[]> {
@@ -478,7 +495,17 @@ async function withProof(
 ): Promise<RenderElement> {
   if (refs.length === 0) return engineRow();
   const root = await rootOf($, settings.root);
-  const found = resolveRefs(refs, await recordsIn($, root), await repoHere($)).slice(0, MAX_PER_REPLY);
+  const instance = `${e.component}:${e.requestId}`;
+  let displaced = false;
+  const found = resolveRefs(refs, await recordsIn($, root), await repoHere($))
+    .filter((r) => {
+      const newest = newestMention(r.dir, instance);
+      displaced ||= newest.displaced;
+      return newest.isNewest;
+    })
+    .slice(0, MAX_PER_REPLY);
+  // The rows that drew this record's button before draw again, without it.
+  if (displaced) $.ui.invalidate("ui.render");
   if (found.length === 0) return engineRow();
 
   const { Box, Text, Button } = $.ui.resolve(e);
@@ -582,11 +609,11 @@ export const register: Register = (on, options) => {
     withProof($, e, () => next(e), findRefs(e.props.text), settings),
   );
 
-  // Claude Code's own line for a shell call, "Created PR #549", is a ToolUse
-  // row, or a ToolGroup when it folded the call with others: the PR is in
-  // the URL the command printed.
+  // Claude Code's own line for a `gh pr` call, "Created PR #549" or "Edited
+  // PR #549", is a ToolUse row, or a ToolGroup when it folded the call with
+  // others: the PR is in the URL the command printed.
   on("ui.render", { component: "ToolUse" }, async ($, e, next) =>
-    withProof($, e, () => next(e), findUrlRefs(outputText(e.props.tool, e.props.output)), settings),
+    withProof($, e, () => next(e), findUrlRefs(ghPrText(e.props.tool, e.props.input, e.props.output)), settings),
   );
 
   on("ui.render", { component: "ToolGroup" }, async ($, e, next) =>
@@ -594,7 +621,7 @@ export const register: Register = (on, options) => {
       $,
       e,
       () => next(e),
-      findUrlRefs(e.props.calls.map((c) => outputText(c.tool, c.output)).join("\n")),
+      findUrlRefs(e.props.calls.map((c) => ghPrText(c.tool, c.input, c.output)).join("\n")),
       settings,
     ),
   );

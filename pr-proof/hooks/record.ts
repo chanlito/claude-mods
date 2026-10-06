@@ -165,6 +165,17 @@ export function outputText(tool: string, output: unknown): string {
   return typeof stdout === "string" ? stdout : "";
 }
 
+/**
+ * What a `gh pr` call printed (create, edit, comment, ready: each prints the
+ * PR's URL); "" for any other call, so a file's text or an API's JSON that
+ * happens to hold a PR link draws no button.
+ */
+export function ghPrText(tool: string, input: unknown, output: unknown): string {
+  const command = (input as { command?: unknown } | null)?.command;
+  if (typeof command !== "string" || !/\bgh\s+pr\s+\w/.test(command)) return "";
+  return outputText(tool, output);
+}
+
 /** `name#541`, the form the session's list of seen PRs keeps. */
 export const refKey = (r: Ref) => `${r.name ?? ""}#${r.pr}`;
 
