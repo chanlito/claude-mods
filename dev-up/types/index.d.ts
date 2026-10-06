@@ -1,5 +1,5 @@
-/** One service as the hint line draws it. */
-export type Dot = { name: string; state: "up" | "starting" | "down" | "broken"; from?: string };
+/** One service as the hint line draws it; `done` marks a task whose output exists (✓, not ●). */
+export type Dot = { name: string; state: "up" | "starting" | "down" | "broken"; done?: true; from?: string };
 /** The stack the session's folder belongs to, as last seen; null when none covers it. */
 export type Dots = { stack: string; services: Dot[] } | null;
 

@@ -23,8 +23,9 @@ export type Service = {
   /** task: the command and the path whose presence says it is done. */
   task?: string;
   creates?: string;
-  /** check: the script, absolute. */
+  /** check: the script, absolute, and an optional read-only command whose exit 0 says it is up. */
   check?: string;
+  probe?: string;
   /** Set when `/dev-up use` moved this service onto another checkout: that checkout's folder name. */
   servedFrom?: string;
 };
@@ -126,7 +127,10 @@ export function parseStack(source: string, file: string, home: string): Stack {
       if (!creates) throw new StackError(`${key}: a task needs creates: (the path that says it is done)`);
       service.creates = resolvePath(creates, service.dir, home);
     }
-    if (kind === "check") service.check = resolvePath(text(s.check, `${key}.check`)!, here, home);
+    if (kind === "check") {
+      service.check = resolvePath(text(s.check, `${key}.check`)!, here, home);
+      service.probe = text(s.probe, `${key}.probe`);
+    } else if (s.probe != null) throw new StackError(`${key}: probe: is for a check service`);
     services.set(key, service);
   }
   if (services.size === 0) throw new StackError("services: lists nothing");
@@ -190,6 +194,13 @@ export function plan(stack: Stack, seen: Observed): Step[] {
     const say = (prefix: Prefix, text: string, action?: Action) =>
       steps.push({ service: s.name, prefix, text: `${s.name}: ${text}`, ...(action ? { action } : {}) });
 
+    if (s.kind === "check") {
+      // The script is its own health check: it runs on every pass once what it waits for is up.
+      const waiting = s.after.filter((d) => !isUp(d));
+      if (waiting.length) say("SKIP", `waits for ${waiting.join(", ")}; next run`);
+      else say("STARTED", s.check!, "check");
+      continue;
+    }
     if (s.kind === "compose") {
       if (state === "up") say("UP", why ?? "containers up");
       else if (state === "starting") say("SKIP", `${why ?? "not healthy yet"}; what waits for it starts next run`);
@@ -198,7 +209,7 @@ export function plan(stack: Stack, seen: Observed): Step[] {
       continue;
     }
     if (state === "up") {
-      say("UP", s.kind === "server" ? (s.port ? `:${s.port}` : "running") : s.kind === "task" ? "done" : (why ?? "up"));
+      say("UP", s.kind === "server" ? (s.port ? `:${s.port}` : "running") : "done");
       continue;
     }
     if (state === "starting") {
@@ -215,8 +226,7 @@ export function plan(stack: Stack, seen: Observed): Step[] {
       say("SKIP", `waits for ${waiting.join(", ")}; next run`);
       continue;
     }
-    if (s.kind === "check") say("STARTED", s.check!, "check");
-    else say("STARTED", s.kind === "server" ? s.run! : s.task!, "start");
+    say("STARTED", s.kind === "server" ? s.run! : s.task!, "start");
   }
   return steps;
 }
@@ -258,9 +268,11 @@ export function applyOverrides(stack: Stack, overrides: Overrides): Stack {
 const GLYPH: Record<State, string> = { up: "●", starting: "◐", down: "○", broken: "✕" };
 
 export function statusLine(stack: Stack, seen: Observed): string {
-  const parts = stack.services.map(
-    (s) => `${GLYPH[seen[s.name]?.state ?? "down"]} ${s.name}${s.servedFrom ? `@${s.servedFrom}` : ""}`,
-  );
+  const parts = stack.services.map((s) => {
+    const state = seen[s.name]?.state ?? "down";
+    const glyph = s.kind === "task" && state === "up" ? "✓" : GLYPH[state];
+    return `${glyph} ${s.name}${s.servedFrom ? `@${s.servedFrom}` : ""}`;
+  });
   return `${stack.name}  ${parts.join("  ")}`;
 }
 

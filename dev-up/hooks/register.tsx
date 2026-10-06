@@ -190,6 +190,7 @@ async function show($: EngineInterface, stack: Stack | undefined, seen: Observed
         services: stack.services.map((s) => ({
           name: s.name,
           state: seen[s.name]?.state ?? "down",
+          ...(s.kind === "task" && seen[s.name]?.state === "up" ? { done: true } : {}),
           ...(s.servedFrom ? { from: s.servedFrom } : {}),
         })),
       }
@@ -201,8 +202,17 @@ async function show($: EngineInterface, stack: Stack | undefined, seen: Observed
 const COLOR = { up: "success", starting: "warning", broken: "error" } as const;
 const GLYPH = { up: "●", starting: "◐", down: "○", broken: "✕" } as const;
 
-/** What each check script last said, by `<stack>/<service>`; scripts run only on a pass. */
-const checks = new Map<string, Seen>();
+const checkFile = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.check`;
+
+/** What a check script last said, kept on disk so a reload and every other session see it too. */
+async function savedCheck($: EngineInterface, home: string, stack: Stack, s: Service): Promise<Seen | undefined> {
+  try {
+    const saved = JSON.parse(await $.fs.read(checkFile(home, stack, s))) as Seen;
+    return ["up", "starting", "down", "broken"].includes(saved.state) ? saved : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
   const home = await homeOf($);
@@ -238,7 +248,15 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
           }
         }
       } else if (s.kind === "check") {
-        entry = checks.get(`${stack.name}/${s.name}`) ?? { state: "down" };
+        // Between passes: the probe, if the stack gives one, beside what the script last said.
+        const saved = await savedCheck($, home, stack, s);
+        if (!s.probe) entry = saved ?? { state: "down" };
+        else {
+          const ok = (await run($, ["sh", "-c", s.probe], { cwd: stack.root, timeoutMs: 10_000 })).exitCode === 0;
+          entry = ok
+            ? saved?.state === "broken" ? saved : { state: "up" }
+            : saved?.state === "starting" ? saved : { state: "down" };
+        }
       } else if (s.kind === "task") {
         if (await $.fs.exists(s.creates!)) entry = { state: "up" };
         else if (alive === true) entry = { state: "starting" };
@@ -290,7 +308,7 @@ async function stop($: EngineInterface, stack: Stack, s: Service): Promise<Run> 
 }
 
 /** Runs a check script; its UP / STARTED / SKIP / WARN lines are relayed under the service's name. */
-async function runCheck($: EngineInterface, stack: Stack, s: Service, dryRun: boolean): Promise<string[]> {
+async function runCheck($: EngineInterface, stack: Stack, s: Service, dryRun: boolean): Promise<{ lines: string[]; seen: Seen }> {
   const r = await run($, dryRun ? [s.check!, "--dry-run"] : [s.check!], {
     cwd: stack.root,
     timeoutMs: 300_000,
@@ -310,8 +328,9 @@ async function runCheck($: EngineInterface, stack: Stack, s: Service, dryRun: bo
     prefixes.push("WARN");
     lines.push(formatStep({ prefix: "WARN", text: `${s.name}: ${s.check} exited ${r.exitCode}: ${lastLine(r.stderr) || "no output"}` }));
   }
-  if (!dryRun) checks.set(`${stack.name}/${s.name}`, { state: stateOfLines(prefixes) });
-  return lines;
+  const seen: Seen = { state: stateOfLines(prefixes) };
+  if (!dryRun) await $.fs.write(checkFile(await homeOf($), stack, s), `${JSON.stringify(seen)}\n`).catch(() => {});
+  return { lines, seen };
 }
 
 async function report($: EngineInterface, stack: Stack): Promise<string | undefined> {
@@ -337,8 +356,9 @@ async function pass($: EngineInterface, stack: Stack, dryRun: boolean): Promise<
       continue;
     }
     if (step.action === "check") {
-      lines.push(...(await runCheck($, stack, s, dryRun)));
-      if (!dryRun) seen[s.name] = checks.get(`${stack.name}/${s.name}`)!;
+      const checked = await runCheck($, stack, s, dryRun);
+      lines.push(...checked.lines);
+      if (!dryRun) seen[s.name] = checked.seen;
       continue;
     }
     if (dryRun) {
@@ -487,7 +507,7 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
     }
     if (s.kind === "check") {
       if (rest) return `${s.name} is a check script; restart takes no extra arguments for it.`;
-      return (await runCheck($, stack, s, false)).join("\n");
+      return (await runCheck($, stack, s, false)).lines.join("\n");
     }
     const seen = await observe($, stack);
     const waiting = s.after.filter((d) => seen[d]?.state !== "up");
@@ -573,7 +593,11 @@ export const register: Register = (on, options) => {
           <Text dimColor>{d.stack}</Text>
           {d.services.map((s) => (
             <Box key={`dev-up-${s.name}`} flexDirection="row">
-              {s.state === "down" ? <Text dimColor>{GLYPH.down}</Text> : <Text color={COLOR[s.state]}>{GLYPH[s.state]}</Text>}
+              {s.state === "down" ? (
+                <Text dimColor>{GLYPH.down}</Text>
+              ) : (
+                <Text color={COLOR[s.state]}>{s.done ? "✓" : GLYPH[s.state]}</Text>
+              )}
               <Text dimColor>
                 {" "}
                 {s.name}

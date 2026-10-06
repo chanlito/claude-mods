@@ -35,6 +35,7 @@ services:
       - db
   seed:
     check: shop/seed.sh
+    probe: test -f seeded
     after: [web]
 
 report:
@@ -148,7 +149,7 @@ test("all up but a crashed server: warn, then start it again; missing node_modul
     "STARTED web: pnpm dev",
     "UP codegen: done",
     `WARN worker: no node_modules in ${ROOT}: install there first`,
-    "UP seed: up",
+    "SKIP seed: waits for web; next run",
   ]);
 });
 
@@ -156,6 +157,7 @@ test("the status line", () => {
   expect(statusLine(stack(), seen({ db: "up", web: "starting", worker: "broken" }))).toBe(
     "shop  ● db  ◐ web  ○ codegen  ✕ worker  ○ seed",
   );
+  expect(statusLine(stack(), seen({ codegen: "up" }))).toMatch(/✓ codegen/);
 });
 
 test("docker compose ps: healthy, still starting, stale after a Docker restart, down", () => {
@@ -199,6 +201,8 @@ function stage(
     files?: string[];
     cwd?: string;
     mtimes?: Record<string, number>;
+    /** Whether the check service's probe passes. */
+    probe?: boolean;
     /** Per folder git is run in: its top folder and the worktrees `git worktree list` gives. */
     git?: Record<string, [string, string[]]>;
   },
@@ -234,6 +238,7 @@ function stage(
     if (cmd === "sh" && e.argv[2]?.includes("PORT"))
       return answer(0, [...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
     if (cmd === "curl") return answer(0, "200");
+    if (cmd === "sh" && e.argv[2] === "test -f seeded") return answer(machine.probe ? 0 : 1, "");
     if (cmd === "git") {
       gitIn.push(e.argv[2]!);
       const hit = machine.git?.[e.argv[2]!];
@@ -470,4 +475,37 @@ test("loading clears the plain status line older versions pinned", async ($, on)
   on("session.start", () => ({ cwd: ROOT }));
   await $.session.start({ cwd: ROOT } as never);
   expect(cleared).toContain(undefined);
+});
+
+/* ---- check services between passes ---- */
+
+test("a check runs on every pass, its result is kept on disk, and the probe answers between passes", async ($, on) => {
+  const { ran, written } = stage(on, {
+    compose: HEALTHY,
+    ports: [3000],
+    pids: ["PID web alive", "PID worker alive"],
+    files: [`${ROOT}/web/node_modules`, `${ROOT}/web/src/generated`],
+    probe: true,
+  });
+  await devUp($);
+  await devUp($);
+  expect(ran.filter((r) => r.argv[0] === `${STACKS}/shop/seed.sh`).length).toBe(2);
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/seed.check`)!)).toEqual({ state: "up" });
+
+  ran.length = 0;
+  const status = await devUp($, "status");
+  expect(ran.some((r) => r.argv[0] === `${STACKS}/shop/seed.sh`)).toBe(false);
+  expect(ran.find((r) => r.argv[2] === "test -f seeded")?.cwd).toBe(ROOT);
+  expect(status.text).toMatch(/^up {7}seed$/m);
+});
+
+test("a finished task is a green check mark on the hint line", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/src/generated`] });
+  await devUp($, "status");
+  const ui = await hint($, "terminal");
+  expect((await ui.find({ type: "Text", text: "✓" }))?.props).toMatchObject({ color: "success" });
+});
+
+test("probe: on anything but a check service is an error", () => {
+  expect(() => parseStack("root: /x\nservices: { a: { run: x, probe: y } }", `${STACKS}/x.yml`, HOME)).toThrow(/probe: is for a check/);
 });
