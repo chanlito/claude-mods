@@ -1,7 +1,7 @@
 import { atom, read, update } from "claude-code";
 import type { EngineInterface, Register } from "claude-code";
 
-import type { Dots } from "../types";
+import type { Cell, Dots, Panel } from "../types";
 
 import {
   applyOverrides,
@@ -95,6 +95,7 @@ const HELP = [
   "/dev-up logs <svc> [n]        the last n lines of its log (40)",
   "/dev-up use <dir>             serve the servers of <dir>'s repo from that worktree",
   "/dev-up restore [<svc>]       serve them from their own folders again",
+  "/dev-up panel                 every service and the end of its log, in a grid",
 ].join("\n");
 
 type Run = { exitCode: number; stdout: string; stderr: string };
@@ -329,7 +330,9 @@ async function runCheck($: EngineInterface, stack: Stack, s: Service, dryRun: bo
     lines.push(formatStep({ prefix: "WARN", text: `${s.name}: ${s.check} exited ${r.exitCode}: ${lastLine(r.stderr) || "no output"}` }));
   }
   const seen: Seen = { state: stateOfLines(prefixes) };
-  if (!dryRun) await $.fs.write(checkFile(await homeOf($), stack, s), `${JSON.stringify(seen)}\n`).catch(() => {});
+  // The lines too, for the panel: a check script keeps no log of its own.
+  const saved = { ...seen, lines: r.stdout.split("\n").filter((l) => l.trim()).slice(-PANEL_LINES) };
+  if (!dryRun) await $.fs.write(checkFile(await homeOf($), stack, s), `${JSON.stringify(saved)}\n`).catch(() => {});
   return { lines, seen };
 }
 
@@ -418,6 +421,10 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
       .join("\n");
   }
   if (verb === "help") return HELP;
+  if (verb === "panel") {
+    await openPanel($, folderSetting);
+    return "Opened the dev stack panel: every service and the end of its log, refreshed every 3 seconds.";
+  }
   if (verb === "logs") {
     const s = serviceOf(stack, name);
     if (typeof s === "string") return s;
@@ -521,6 +528,93 @@ async function dispatch($: EngineInterface, folderSetting: string, args: string)
   return `Unknown: ${verb}\n\n${HELP}`;
 }
 
+/* ---- /dev-up panel ---- */
+
+const PANE = "dev-up";
+const PANEL_MS = 3_000;
+const PANEL_LINES = 40;
+const panel = atom({ plugin: "dev-up", key: "panel" } as const, null);
+let panelTimer: { cancel: () => void } | undefined;
+let filling = false;
+
+/** A log line as text: colors, cursor moves and carriage returns taken out. */
+const plain = (line: string) =>
+  line
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b\][^\u0007]*(\u0007|\u001b\\)/g, "")
+    .replace(/\r/g, "");
+
+async function logLines($: EngineInterface, home: string, stack: Stack, s: Service): Promise<string[]> {
+  const n = String(PANEL_LINES);
+  if (s.kind === "check") {
+    try {
+      const saved = JSON.parse(await $.fs.read(checkFile(home, stack, s))) as { lines?: string[] };
+      return saved.lines?.length ? saved.lines : ["(no output yet)"];
+    } catch {
+      return ["(not run yet: /dev-up runs it)"];
+    }
+  }
+  const r =
+    s.kind === "compose"
+      ? await run($, ["docker", "compose", "logs", "--no-color", "--tail", n], { cwd: s.dir, timeoutMs: 10_000 })
+      : await run($, ["tail", "-n", n, logOf(home, stack, s)], { timeoutMs: 5_000 });
+  if (r.exitCode !== 0) return [s.kind === "compose" ? "(docker compose logs failed)" : "(no log: not started by /dev-up)"];
+  const lines = r.stdout.split("\n").map(plain).filter((l) => l.trim());
+  return lines.length ? lines : ["(empty)"];
+}
+
+const detailOf = (s: Service) => (s.kind === "server" ? (s.port ? `:${s.port}` : "server") : s.kind === "compose" ? "docker" : s.kind);
+
+/** Refills the panel's cells; written only when something changed. */
+async function fillPanel($: EngineInterface, folderSetting: string) {
+  if (filling) return;
+  filling = true;
+  try {
+    const { stack } = await findStack($, folderSetting);
+    let next: Panel = { stack: "", cells: [] };
+    if (stack) {
+      const home = await homeOf($);
+      const seen = await observe($, stack);
+      const cells: Cell[] = await Promise.all(
+        stack.services.map(async (s) => {
+          const state = seen[s.name]?.state ?? "down";
+          return {
+            name: s.name,
+            kind: s.kind,
+            state,
+            ...(s.kind === "task" && state === "up" ? { done: true as const } : {}),
+            ...(s.servedFrom ? { from: s.servedFrom } : {}),
+            detail: detailOf(s),
+            lines: await logLines($, home, stack, s),
+          };
+        }),
+      );
+      next = { stack: stack.name, cells };
+      await show($, stack, seen);
+    }
+    if (JSON.stringify(await read($, panel)) !== JSON.stringify(next)) await update($, panel, () => next);
+  } catch {
+    // The next tick tries again.
+  } finally {
+    filling = false;
+  }
+}
+
+async function openPanel($: EngineInterface, folderSetting: string) {
+  await $.ui.open({ id: PANE, title: "Dev stack" });
+  await fillPanel($, folderSetting);
+  panelTimer ??= $.clock.every(PANEL_MS, () => {
+    void (async () => {
+      if (!(await $.ui.panes()).some((p) => p.id === PANE)) {
+        panelTimer?.cancel();
+        panelTimer = undefined;
+        return;
+      }
+      await fillPanel($, folderSetting);
+    })();
+  });
+}
+
 let refreshing = false;
 
 async function refresh($: EngineInterface, folderSetting: string) {
@@ -549,7 +643,7 @@ export const register: Register = (on, options) => {
       await $.command.register({
         name: "dev-up",
         description: "Bring up this folder's dev stack: start what is down, skip what waits",
-        argumentHint: "[status|restart <svc> [args]|stop [<svc>]|logs <svc>|use <dir>|restore|--dry-run]",
+        argumentHint: "[panel|status|restart <svc> [args]|stop [<svc>]|logs <svc>|use <dir>|restore|--dry-run]",
       });
     } catch (error) {
       commandTaken = true;
@@ -580,6 +674,75 @@ export const register: Register = (on, options) => {
     return next(e);
   });
 
+  on("ui.close", async ($, e, next) => {
+    if (e.id === PANE) {
+      panelTimer?.cancel();
+      panelTimer = undefined;
+    }
+    return next(e);
+  });
+
+  // The panel: one bordered cell per service, its state on the frame, the end of its log inside.
+  on("ui.render", { component: "Pane", requestId: PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e);
+    const p = await read($, panel);
+    if (!p) return <Text dimColor>Looking at the stack…</Text>;
+    if (!p.cells.length) return <Text dimColor>No stack covers this folder. A stack is ~/.claude/dev-stacks/name.yml.</Text>;
+    const width = Math.max(20, e.props.bodyColumns);
+    const cols = width >= 150 ? 3 : width >= 90 ? 2 : 1;
+    const cellWidth = Math.floor((width - (cols - 1)) / cols);
+    const gridRows = Math.ceil(p.cells.length / cols);
+    const logRows = Math.max(3, Math.min(30, Math.floor(e.props.scroll.bodyRows / gridRows) - 3));
+    return (
+      <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+        {p.cells.map((c) => (
+          <Box
+            key={`cell-${c.name}`}
+            width={cellWidth}
+            height={logRows + 3}
+            flexDirection="column"
+            borderStyle="round"
+            {...(c.state === "down" ? { borderDimColor: true } : { borderColor: COLOR[c.state] })}
+            overflow="hidden"
+          >
+            <Box flexDirection="row" gap={1}>
+              {c.state === "down" ? (
+                <Text dimColor>{GLYPH.down}</Text>
+              ) : (
+                <Text color={COLOR[c.state]}>{c.done ? "✓" : GLYPH[c.state]}</Text>
+              )}
+              <Text bold>
+                {c.name}
+                {c.from ? `@${c.from}` : ""}
+              </Text>
+              <Text dimColor>{c.detail}</Text>
+              {(c.kind === "server" || c.kind === "task") && (
+                <Button
+                  key={`restart-${c.name}`}
+                  label="restart"
+                  plain
+                  dimColor
+                  onPress={() =>
+                    void (async () => {
+                      const out = await dispatch($, folderSetting, `restart ${c.name}`);
+                      $.ui.toast(out.split("\n")[0] ?? out);
+                      await fillPanel($, folderSetting);
+                    })()
+                  }
+                />
+              )}
+            </Box>
+            {c.lines.slice(-logRows).map((line, i) => (
+              <Text key={`log-${c.name}-${i}`} dimColor wrap="truncate-end">
+                {line}
+              </Text>
+            ))}
+          </Box>
+        ))}
+      </Box>
+    );
+  });
+
   // The stack's dots, colored, at the end of the hint line under the prompt.
   on("ui.render", { component: "PromptHint" }, async ($, e, next) => {
     const d = await read($, dots);
@@ -590,7 +753,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" gap={2}>
         {own}
         <Box key="dev-up" flexDirection="row" gap={1}>
-          <Text dimColor>{d.stack}</Text>
+          <Text dimColor>dev</Text>
           {d.services.map((s) => (
             <Box key={`dev-up-${s.name}`} flexDirection="row">
               {s.state === "down" ? (

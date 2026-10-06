@@ -19,8 +19,8 @@ Running it again is both the health check and the way to finish.
 Servers start detached (`setsid`), with a log and a pid file under
 `~/.cache/dev-up/<stack>/`. They outlive the turn, the Claude session and a
 reload of the mod, and every session in the stack's folder sees the same ones.
-The stack's state shows at the end of the hint line under the prompt, one
-colored dot per service: green up, yellow starting, red broken, dim down. A
+The stack's state shows at the end of the hint line under the prompt, after
+`dev`, one colored dot per service: green up, yellow starting, red broken, dim down. A
 task whose output exists shows a green ✓. The dots refresh every 30 seconds.
 
 ## Installation
@@ -133,6 +133,7 @@ comments.
 | `/dev-up` | one pass |
 | `/dev-up --dry-run` | what a pass would do; check scripts get `--dry-run` |
 | `/dev-up status` | each service's state and why |
+| `/dev-up panel` | a pane with one cell per service in a grid: its state on the border, the end of its log inside, a restart button; refreshed every 3 seconds while open |
 | `/dev-up restart <svc> [args]` | stop and start one service; anything after its name is added to its command this once, so `restart metro -- --clear` runs `npm start -- --clear`. A compose service is recreated |
 | `/dev-up stop [<svc>]` | stop one service, or every server and task (containers stay up) |
 | `/dev-up logs <svc> [n]` | the last `n` lines of its log (40) |

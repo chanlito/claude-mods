@@ -238,6 +238,8 @@ function stage(
     if (cmd === "sh" && e.argv[2]?.includes("PORT"))
       return answer(0, [...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
     if (cmd === "curl") return answer(0, "200");
+    if (cmd === "tail") return answer(e.argv[3]!.endsWith("web.log") ? 0 : 1, "\u001b[32mready\u001b[39m on :3000\r\nGET / 200\n");
+    if (cmd === "docker" && e.argv[2] === "logs") return answer(0, "postgres-1  | database system is ready\n");
     if (cmd === "sh" && e.argv[2] === "test -f seeded") return answer(machine.probe ? 0 : 1, "");
     if (cmd === "git") {
       gitIn.push(e.argv[2]!);
@@ -253,7 +255,16 @@ function stage(
     const { Text } = $.ui.resolve(e);
     return <Text>? for shortcuts</Text>;
   });
-  return { ran, written, gitIn };
+  const panes = new Set<string>();
+  on("ui.open", (_$, e) => {
+    panes.add(e.id);
+    return { value: { isPlaced: true } };
+  });
+  on("ui.panes", () => ({
+    value: [...panes].map((id) => ({ id, title: "Dev stack", isShown: true, isFocused: false, isPlaced: true })),
+  }));
+  on("ui.toast", () => ({ value: undefined }));
+  return { ran, written, gitIn, panes };
 }
 
 const HEALTHY = [
@@ -447,7 +458,7 @@ for (const surface of ["terminal", "desktop"] as const) {
     await devUp($, "status");
     const ui = await hint($, surface);
     expect(await ui.find({ type: "Text", text: "? for shortcuts" })).toBeDefined();
-    expect(await ui.find({ type: "Text", text: "shop" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "dev" })).toBeDefined();
     expect(await ui.find({ key: "dev-up-db" })).toBeDefined();
     expect((await ui.find({ type: "Text", text: "●" }))?.props).toMatchObject({ color: "success" });
     expect((await ui.find({ type: "Text", text: "✕" }))?.props).toMatchObject({ color: "error" });
@@ -490,7 +501,7 @@ test("a check runs on every pass, its result is kept on disk, and the probe answ
   await devUp($);
   await devUp($);
   expect(ran.filter((r) => r.argv[0] === `${STACKS}/shop/seed.sh`).length).toBe(2);
-  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/seed.check`)!)).toEqual({ state: "up" });
+  expect(JSON.parse(written.get(`${HOME}/.cache/dev-up/shop/seed.check`)!)).toEqual({ state: "up", lines: ["UP      seeded", "rows 12"] });
 
   ran.length = 0;
   const status = await devUp($, "status");
@@ -508,4 +519,60 @@ test("a finished task is a green check mark on the hint line", async ($, on) => 
 
 test("probe: on anything but a check service is an error", () => {
   expect(() => parseStack("root: /x\nservices: { a: { run: x, probe: y } }", `${STACKS}/x.yml`, HOME)).toThrow(/probe: is for a check/);
+});
+
+/* ---- /dev-up panel ---- */
+
+const pane = ($: Engine, surface: "terminal" | "desktop", bodyColumns = 160) =>
+  $.ui.mount({
+    plugin: "dev-up",
+    surface,
+    component: "Pane",
+    requestId: "dev-up",
+    props: { title: "Dev stack", isFocused: false, bodyColumns, placement: "inline", scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  });
+
+for (const surface of ["terminal", "desktop"] as const) {
+  test(`on ${surface}, the panel shows a cell per service with its state and the end of its log`, async ($, on) => {
+    const { panes } = stage(on, {
+      compose: HEALTHY,
+      ports: [3000],
+      pids: ["PID web alive", "PID worker dead"],
+      files: [`${ROOT}/web/node_modules`],
+    });
+    const out = await devUp($, "panel");
+    expect(out.text).toMatch(/Opened the dev stack panel/);
+    expect(panes.has("dev-up")).toBe(true);
+    const ui = await pane($, surface);
+    for (const name of ["db", "web", "codegen", "worker", "seed"]) expect(await ui.find({ key: `cell-${name}` })).toBeDefined();
+    expect((await ui.find({ key: "cell-web" }))?.props).toMatchObject({ borderColor: "success" });
+    expect((await ui.find({ key: "cell-worker" }))?.props).toMatchObject({ borderColor: "error" });
+    expect((await ui.find({ key: "cell-codegen" }))?.props).toMatchObject({ borderDimColor: true });
+    expect(await ui.find({ type: "Text", text: /^ready on :3000$/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /^GET \/ 200$/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: /database system is ready/ })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "(no log: not started by /dev-up)" })).toBeDefined();
+    expect(await ui.find({ type: "Text", text: "(not run yet: /dev-up runs it)" })).toBeDefined();
+  });
+}
+
+test("the panel's restart button restarts that service", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  await devUp($, "panel");
+  const ui = await pane($, "terminal");
+  ran.length = 0;
+  await ui.press({ key: "restart-web" });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual(["pnpm dev"]);
+});
+
+test("a wide panel lays the cells out in three columns", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"] });
+  await devUp($, "panel");
+  expect((await (await pane($, "terminal", 161)).find({ key: "cell-db" }))?.props).toMatchObject({ width: 53 });
+});
+
+test("a narrow panel stacks them in one column", async ($, on) => {
+  stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"] });
+  await devUp($, "panel");
+  expect((await (await pane($, "terminal", 60)).find({ key: "cell-db" }))?.props).toMatchObject({ width: 60 });
 });
