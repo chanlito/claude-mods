@@ -191,10 +191,17 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
   return seen;
 }
 
-/** `extra` is added to the command for this start only (`-- --clear`). */
+/** One shell word, quoted so the shell reads it as text and runs nothing in it. */
+const shellWord = (word: string) => `'${word.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * `extra` is added to the command for this start only (`-- --clear`), each word
+ * quoted: it comes from a prompt or the model's tool call, never from the stack file.
+ */
 async function start($: EngineInterface, stack: Stack, s: Service, extra = ""): Promise<Run> {
   const home = await homeOf($);
-  const command = [s.kind === "task" ? s.task! : s.run!, extra].filter(Boolean).join(" ");
+  const words = extra.split(/\s+/).filter(Boolean).map(shellWord);
+  const command = [s.kind === "task" ? s.task! : s.run!, ...words].join(" ");
   return run($, ["sh", "-c", START, "sh", s.dir, command, logOf(home, stack, s), pidOf(home, stack, s)]);
 }
 

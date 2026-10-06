@@ -81,6 +81,7 @@ export function parseStack(source: string, file: string, home: string): Stack {
   const d = doc as Record<string, unknown>;
 
   const name = text(d.name, "name") ?? file.split("/").at(-1)!.replace(/\.ya?ml$/, "");
+  if (!NAME.test(name)) throw new StackError(`name: "${name}" must be letters, digits, . _ - (it names a folder)`);
   const here = dirOf(file);
   const rootText = text(d.root, "root");
   if (!rootText) throw new StackError("root: is missing (the folder this stack covers)");

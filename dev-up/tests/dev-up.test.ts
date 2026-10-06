@@ -293,14 +293,26 @@ test("restart adds its extra arguments to the command, this once", async ($, on)
   const stops = ran.filter((r) => r.argv[2]?.includes("holders()"));
   const starts = ran.filter((r) => r.argv[2]?.includes("setsid"));
   expect(stops.map((r) => r.argv.slice(4, 6))).toEqual([[`${HOME}/.cache/dev-up/shop/web.pid`, "3000"]]);
-  expect(starts.map((r) => r.argv[5])).toEqual(["pnpm dev -- --clear"]);
+  expect(starts.map((r) => r.argv[5])).toEqual(["pnpm dev '--' '--clear'"]);
   expect(out.text).toMatch(/^Restarted web with -- --clear {2}\(log /);
 });
 
 test("the tool passes restart's args through; containers take none", async ($, on) => {
   const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
   await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "restart", service: "web", args: "-- --clear" });
-  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual(["pnpm dev -- --clear"]);
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual(["pnpm dev '--' '--clear'"]);
   const out = await devUp($, "restart db -- --pull");
   expect(out.text).toMatch(/db is containers; restart takes no extra arguments/);
+});
+
+test("restart's extra words reach the shell as text, never as commands", async ($, on) => {
+  const { ran } = stage(on, { compose: HEALTHY, ports: [3000], pids: ["PID web alive"], files: [`${ROOT}/web/node_modules`] });
+  await $.tool.call({ tool: "mcp__dev-up__dev_up", action: "restart", service: "web", args: "; touch /tmp/x $(id) it's" });
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[5])).toEqual([
+    "pnpm dev ';' 'touch' '/tmp/x' '$(id)' 'it'\\''s'",
+  ]);
+});
+
+test("a stack's name must be a plain folder name", () => {
+  expect(() => parseStack("name: ../x\nroot: /x\nservices: { a: { run: x } }", `${STACKS}/x.yml`, HOME)).toThrow(/names a folder/);
 });
