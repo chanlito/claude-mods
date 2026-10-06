@@ -22,7 +22,7 @@ import {
 const REFRESH_MS = 30_000;
 const TOOL = "dev_up";
 
-/** Prints `PORT <n>` per listening TCP port and `PID <service> alive|dead` per pid file. */
+/** Prints `PORT <n>` per listening TCP port and `PID <service> alive|dead` per pid file (its process group). */
 const PROBE = String.raw`
 dir="$1"
 if command -v ss >/dev/null 2>&1; then ss -ltnH 2>/dev/null | awk '{print $4}'
@@ -30,7 +30,8 @@ else lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $9}'; fi | sed -
 for f in "$dir"/*.pid; do
   [ -e "$f" ] || continue
   n=$(basename "$f" .pid); p=$(cat "$f")
-  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "PID $n alive"; else echo "PID $n dead"; fi
+  # The group, not only its first process: a watcher outlives the shell it started from.
+  if [ -n "$p" ] && { kill -0 "-$p" 2>/dev/null || kill -0 "$p" 2>/dev/null; }; then echo "PID $n alive"; else echo "PID $n dead"; fi
 done
 `;
 
@@ -54,8 +55,9 @@ echo $! > "$pidf"
 
 /**
  * Stops by process group and by port: a dev server's child (a watcher's
- * compiled main) can outlive its parent and keep the port. TERM, up to five
- * seconds, then KILL.
+ * compiled main) can outlive its parent and keep the port, and a watcher can
+ * outlive the TERM that ends the shell it started from. TERM, up to five
+ * seconds while anything in the group or on the port lives, then KILL.
  */
 const STOP = String.raw`
 pidf="$1"; port="$2"; log="$3"
@@ -65,13 +67,13 @@ holders() {
   if command -v ss >/dev/null 2>&1; then ss -ltnpH "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2
   else lsof -t -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null; fi | sort -u
 }
-alive() { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
-[ -n "$p" ] && { kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; }
+alive() { [ -n "$p" ] && { kill -0 "-$p" 2>/dev/null || kill -0 "$p" 2>/dev/null; }; }
+[ -n "$p" ] && { kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null; }
 h=$(holders); [ -n "$h" ] && kill -TERM $h 2>/dev/null
 i=0
 while [ $i -lt 20 ] && { alive || [ -n "$(holders)" ]; }; do sleep 0.25; i=$((i+1)); done
 h=$(holders); [ -n "$h" ] && kill -KILL $h 2>/dev/null
-alive && { kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; }
+[ -n "$p" ] && { kill -KILL "-$p" 2>/dev/null; kill -KILL "$p" 2>/dev/null; }
 rm -f "$pidf"
 printf '[dev-up] %s  stopped\n' "$(date '+%F %T')" >> "$log"
 exit 0
