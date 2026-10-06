@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Validates, type-checks and tests every mod the commit touches, and the
+# marketplace when its listing changes. A mod's checks are `claude plugin
+# validate`, `tsc` against the engine's types, its `claude plugin test` suite
+# and any tests/*.sh beside it.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[[ -n $staged ]] || exit 0
+
+if grep -q '^\.claude-plugin/' <<<"$staged"; then
+  echo "pre-commit: claude plugin validate ."
+  claude plugin validate . >/dev/null
+fi
+
+for mod in $(cut -d/ -f1 <<<"$staged" | sort -u); do
+  [[ -f $mod/.claude-plugin/plugin.json ]] || continue
+  echo "pre-commit: $mod"
+  out=$(claude plugin validate "$mod" 2>&1) || { echo "$out"; exit 1; }
+  # The engine lays its types beside a mod it has loaded from this folder
+  # (gitignored). A mod it has not loaded yet borrows a sibling's: one engine,
+  # one contract. None anywhere: say so and let the tests stand alone.
+  if [[ -f $mod/tsconfig.json ]]; then
+    if [[ ! -d $mod/.claude-plugin/types/claude-code ]]; then
+      laid=$(ls -d */.claude-plugin/types 2>/dev/null | head -1)
+      [[ -n $laid ]] && cp -r "$laid" "$mod/.claude-plugin/types"
+    fi
+    if [[ -d $mod/.claude-plugin/types/claude-code ]]; then
+      out=$(npx -y -p typescript@5 tsc -p "$mod" 2>&1) || { echo "$out" | head -20; exit 1; }
+    else
+      echo "pre-commit: $mod: no engine types laid anywhere, tsc skipped"
+    fi
+  fi
+  if [[ -d $mod/tests ]]; then
+    out=$(claude plugin test "$mod" 2>&1) || { echo "$out" | grep -E '^\(fail\)|Error|pass$|fail$'; exit 1; }
+    for t in "$mod"/tests/*.sh; do
+      [[ -e $t ]] || continue
+      bash "$t" || { echo "pre-commit: $t failed"; exit 1; }
+    done
+  fi
+done

@@ -12,9 +12,10 @@ Every check you run lands in one record, `<records>/<repo>/<pr>/proof.json`, bes
 3. **Outline what changed** on each after shot (and on the before when it helps), with the box around the element that changed:
 
    ```sh
-   # ImageMagick 7 is `magick`; 6 is `convert`. Args: in out x0 y0 x1 y1 "label".
+   # ImageMagick 7 is `magick`, 6 is `convert`. Args: in out x0 y0 x1 y1 "label".
+   im() { if command -v magick >/dev/null; then magick "$@"; else convert "$@"; fi; }
    outline() {
-     magick "$1" -fill none -stroke '#dc2626' -strokewidth 6 \
+     im "$1" -fill none -stroke '#dc2626' -strokewidth 6 \
        -draw "roundrectangle $3,$4 $5,$6 12,12" \
        -stroke none -fill white -undercolor '#dc2626' -pointsize 30 -gravity NorthWest \
        -annotate +"$3"+"$(( $4 > 50 ? $4 - 44 : $6 + 8 ))" " $7 " "$2"
@@ -22,9 +23,10 @@ Every check you run lands in one record, `<records>/<repo>/<pr>/proof.json`, bes
    outline after-raw.png warning-after.png 184 82 982 148 "Added: warning"
    ```
 
-   Take the box from the element's real bounds (the UI tree, the DOM, `getBoundingClientRect`) rather than guessing from the picture, and keep the label big: the PR shows the picture at about half its width.
+   Take the box from the element's real bounds (the UI tree, the DOM, `getBoundingClientRect`) rather than guessing from the picture, and keep the label big: the PR shows the picture at about half its width. Write the label in English: ImageMagick draws Khmer, Thai and other shaped scripts as blanks.
 4. **Write `proof.json`** as checks happen, not from memory at the end (shape below). A check you planned and did not run is `"result": "skip"`; something you never tried goes in `notChecked`.
-5. **Name the PR in your reply** (`shop-web#541 is ready for review`). The mod finds the record from that.
+5. **Show the pictures in the PR's description**: `bin/publish-pictures.sh <owner/repo> <pr> <picture>...`, two folders up from this skill's own, uploads them to the repo's `pr-proof` branch and prints the before/after table for the Evidence section.
+6. **Name the PR in your reply** (`shop-web#541 is ready for review`). The mod finds the record from that.
 
 Done when every claim in your report has a check in the record, every check on a screen has its file, and everything you did not check is listed.
 

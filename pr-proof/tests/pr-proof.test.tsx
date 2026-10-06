@@ -100,7 +100,7 @@ const answer = (exitCode: number, stdout: string) => ({
 });
 
 /** Records on disk, the host's processes and toasts, all answered from memory. */
-function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") {
+function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux", merged = new Set<string>()) {
   mock.env(on, { HOME: "/home/me", ...env });
   mock.clock(on);
   const ran: string[][] = [];
@@ -143,6 +143,7 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux") 
     if (e.argv[0] === "sh")
       return answer(0, `1000 625\n${e.argv[8] === "image" ? PNG : toBase64(PPM)}`);
     if (e.argv[0] === "git") return answer(0, "/home/me/code/shop-web\n");
+    if (e.argv[0] === "gh" && e.argv[1] === "api") return answer(0, merged.has(e.argv[2] ?? "") ? "2026-10-01T00:00:00Z\n" : "\n");
     if (e.argv[0] === "wslpath") return answer(0, `\\\\wsl.localhost\\Ubuntu${e.argv[2]?.replaceAll("/", "\\")}\n`);
     if (e.argv[0] === "uname") return answer(0, `${uname}\n`);
     return answer(0, "");
@@ -491,3 +492,32 @@ test("a reply naming two recorded PRs labels each button", async ($, on) => {
   expect(await ui.find({ type: "Text", text: "shop-web#541" })).toBeDefined();
   expect(await ui.find({ type: "Text", text: "api#12" })).toBeDefined();
 });
+
+test("a PR opened with no record tells the model so, once, in the call's context", async ($, on) => {
+  stage($, on, {});
+  on("tool.call", () => ({ result: { stdout: "https://github.com/acme/api/pull/77\n", stderr: "" } }));
+  const ran = await $.tool.call({ tool: "Bash", command: "gh pr create --fill" });
+  expect(ran.context?.join("\n")).toMatch(/no proof record for api#77 yet/);
+});
+
+test("a PR opened with its record already written adds nothing", async ($, on) => {
+  stage($, on, {});
+  on("tool.call", () => ({ result: { stdout: `${PR_URL}\n`, stderr: "" } }));
+  const ran = await $.tool.call({ tool: "Bash", command: "gh pr create --fill" });
+  expect(ran.context ?? []).toEqual([]);
+});
+
+test("a merged PR's proof draws no button: there is nothing left to review", async ($, on) => {
+  stage($, on, {}, "Linux", new Set(["repos/acme/shop-web/pulls/541"]));
+  const ui = await reply($, "web#541 is merged.");
+  expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+});
+
+test("an open PR, asked of gh, keeps its button", async ($, on) => {
+  const { ran } = stage($, on, {});
+  const ui = await reply($, "web#541 is ready.");
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  expect(ran.some((argv) => argv[0] === "gh" && argv[2] === "repos/acme/shop-web/pulls/541")).toBe(true);
+});
+

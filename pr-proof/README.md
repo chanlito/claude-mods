@@ -15,6 +15,10 @@ pr-proof reads `<root>/<repo>/<pr>/proof.json` and the files beside it, `<root>`
 
 The plugin ships the `record-proof` skill, which tells Claude how to write the record and outline its screenshots while it verifies. The record's shape is in [`skills/record-proof/SKILL.md`](./skills/record-proof/SKILL.md).
 
+A PR opened with `gh pr create` and no record yet gets one line in the model's context saying so, so the record is written while the checks are fresh.
+
+`bin/publish-pictures.sh <owner/repo> <pr> <picture>...` puts a record's pictures on the repo's orphan `pr-proof` branch and prints the before/after table for the PR's description.
+
 `/proof` lists the records, this session's first (a PR a command in it printed, or a record a call in it wrote or named by path), then the others; `/proof repo#541` reveals one's folder.
 
 ## Settings
