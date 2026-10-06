@@ -167,7 +167,8 @@ export function pickStack(stacks: Stack[], cwd: string): Stack | undefined {
 }
 
 export type State = "down" | "starting" | "up" | "broken";
-export type Seen = { state: State; why?: string; needsInstall?: boolean };
+/** `needsInstall` says why the folder needs an install before it can start. */
+export type Seen = { state: State; why?: string; needsInstall?: string };
 export type Observed = Record<string, Seen>;
 
 export type Prefix = "UP" | "STARTED" | "SKIP" | "WARN" | "STOP" | "ACTION";
@@ -204,7 +205,7 @@ export function plan(stack: Stack, seen: Observed): Step[] {
     }
     if (state === "broken") say("WARN", why ?? "exited since it was started");
     if (needsInstall) {
-      say("WARN", `no node_modules in ${s.dir}: install there first`);
+      say("WARN", `${needsInstall}: install there first`);
       continue;
     }
     const waiting = s.after.filter((d) => !isUp(d));

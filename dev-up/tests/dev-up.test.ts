@@ -140,7 +140,7 @@ test("all up but a crashed server: warn, then start it again; missing node_modul
   const steps = plan(s, {
     ...seen({ db: "up", codegen: "up", seed: "up" }),
     web: { state: "broken", why: "exited since it was started" },
-    worker: { state: "down", needsInstall: true },
+    worker: { state: "down", needsInstall: `no node_modules in ${ROOT}` },
   });
   expect(steps.map((x) => `${x.prefix} ${x.text}`)).toEqual([
     "UP db: containers up",
@@ -192,7 +192,7 @@ const answer = (exitCode: number, stdout: string, stderr = "") => ({
 /** The shop stack on disk, the session in its web folder, Docker and the shell answered from memory. */
 function stage(
   on: On,
-  machine: { compose: string; ports?: number[]; pids?: string[]; files?: string[]; cwd?: string },
+  machine: { compose: string; ports?: number[]; pids?: string[]; files?: string[]; cwd?: string; mtimes?: Record<string, number> },
 ) {
   mock.env(on, { HOME });
   mock.clock(on);
@@ -205,6 +205,11 @@ function stage(
   );
   on("fs.read", (_$, e) => ({ value: e.path === `${STACKS}/shop.yml` ? SHOP : "" }));
   on("fs.exists", (_$, e) => ({ value: files.has(e.path) }));
+  on("fs.stat", (_$, e) => {
+    const mtimeMs = machine.mtimes?.[e.path];
+    if (mtimeMs === undefined) throw new Error(`ENOENT: ${e.path}`);
+    return { value: { kind: "file" as const, size: 1, mtimeMs, isLink: false } };
+  });
   on("process.run", (_$, e) => {
     ran.push({ argv: [...e.argv], cwd: e.init?.cwd });
     const [cmd, a, b] = e.argv;
@@ -315,4 +320,15 @@ test("restart's extra words reach the shell as text, never as commands", async (
 
 test("a stack's name must be a plain folder name", () => {
   expect(() => parseStack("name: ../x\nroot: /x\nservices: { a: { run: x } }", `${STACKS}/x.yml`, HOME)).toThrow(/names a folder/);
+});
+
+test("a lockfile newer than the last install: warn and do not start", async ($, on) => {
+  const { ran } = stage(on, {
+    compose: HEALTHY,
+    files: [`${ROOT}/web/package.json`, `${ROOT}/web/node_modules`],
+    mtimes: { [`${ROOT}/web/package-lock.json`]: 2000, [`${ROOT}/web/node_modules/.package-lock.json`]: 1000 },
+  });
+  const out = await devUp($);
+  expect(out.text).toMatch(/^WARN {4}web: package-lock\.json in .*\/web changed since the last npm install: install there first/m);
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).map((r) => r.argv[4])).toEqual([ROOT]);
 });

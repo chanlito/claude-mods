@@ -178,13 +178,8 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
         else if (alive === false) entry = { state: "broken", why: `exited since it was started; log: ${log}` };
         else entry = { state: "down" };
       }
-      if (
-        (s.kind === "server" || s.kind === "task") &&
-        entry.state !== "up" &&
-        (await $.fs.exists(`${s.dir}/package.json`)) &&
-        !(await $.fs.exists(`${s.dir}/node_modules`))
-      )
-        entry.needsInstall = true;
+      if ((s.kind === "server" || s.kind === "task") && entry.state !== "up" && (await $.fs.exists(`${s.dir}/package.json`)))
+        entry.needsInstall = await installGap($, s.dir);
       seen[s.name] = entry;
     }),
   );
@@ -198,6 +193,18 @@ const shellWord = (word: string) => `'${word.replace(/'/g, `'\\''`)}'`;
  * `extra` is added to the command for this start only (`-- --clear`), each word
  * quoted: it comes from a prompt or the model's tool call, never from the stack file.
  */
+/**
+ * Why `dir` needs an install before it can start, if it does: no node_modules,
+ * or a lockfile newer than the install npm last recorded (a pull added a package).
+ */
+async function installGap($: EngineInterface, dir: string): Promise<string | undefined> {
+  if (!(await $.fs.exists(`${dir}/node_modules`))) return `no node_modules in ${dir}`;
+  const stat = (path: string) => $.fs.stat(path).catch(() => undefined);
+  const [lock, installed] = await Promise.all([stat(`${dir}/package-lock.json`), stat(`${dir}/node_modules/.package-lock.json`)]);
+  if (lock && installed && lock.mtimeMs > installed.mtimeMs) return `package-lock.json in ${dir} changed since the last npm install`;
+  return undefined;
+}
+
 async function start($: EngineInterface, stack: Stack, s: Service, extra = ""): Promise<Run> {
   const home = await homeOf($);
   const words = extra.split(/\s+/).filter(Boolean).map(shellWord);

@@ -105,8 +105,9 @@ Each service has exactly one of `compose`, `run`, `task` or `check`.
   running. A container left `Exited (127)` after Docker Desktop restarts on WSL
   gets a WARN with the `--force-recreate` fix.
 - **run**: a server. It is up when `port` listens, or while its process lives
-  if it has no port. A folder with `package.json` but no `node_modules` gets a
-  WARN and is not started.
+  if it has no port. A folder with `package.json` gets a WARN and is not started
+  when it has no `node_modules`, or when its `package-lock.json` is newer than
+  the last `npm install` (a pull added a package).
 - **task**: a one-off command that is done once `creates` exists.
 - **check**: an executable for anything a stack file can't say. It runs with
   the root as its working folder, `DEV_UP_STACK` and `DEV_UP_ROOT` set, and
