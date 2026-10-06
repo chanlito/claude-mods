@@ -526,34 +526,38 @@ test("an open PR, asked of gh, keeps its button", async ($, on) => {
   expect(ran.some((argv) => argv[0] === "gh" && argv[2] === "repos/acme/shop-web/pulls/541")).toBe(true);
 });
 
-const mountReply = ($: Engine, requestId: string, text: string) =>
-  $.ui.mount({
+test("two recorded PRs from two repos each draw a labelled button", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
     plugin: "pr-proof",
     surface: "terminal",
     component: "AssistantMessage",
-    requestId,
-    props: { text, isFirstOfReply: true },
+    requestId: "two-repos",
+    props: { text: "web#541 and acme/api#12 are both ready.", isFirstOfReply: true },
   });
-
-test("an open PR named with no record says its proof is missing", async ($, on) => {
-  const { ran } = stage($, on, {});
-  const ui = await mountReply($, "missing-1", "api#99 is ready for review.");
-  expect(await ui.find({ type: "Text", text: "! No proof recorded" })).toBeDefined();
-  // The owner came from the record of the same repo, acme/api.
-  expect(ran.some((argv) => argv[0] === "gh" && argv[2] === "repos/acme/api/pulls/99")).toBe(true);
-});
-
-test("a merged PR, an unknown number and a bare #n with no record say nothing", async ($, on) => {
-  stage($, on, {}, "Linux", new Set(["repos/acme/api/pulls/99"]));
-  const ui = await mountReply($, "missing-2", "api#99 merged; api#5 and #99 too.");
-  expect(await ui.find({ type: "Text", text: "! No proof recorded" })).toBe(undefined);
-});
-
-test("a recorded PR and a missing one in one reply are told apart", async ($, on) => {
-  stage($, on, {});
-  const ui = await mountReply($, "missing-3", "web#541 and api#99 are ready.");
   expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
-  expect(await ui.find({ type: "Text", text: "! No proof recorded" })).toBeDefined();
-  expect(await ui.find({ type: "Text", text: "api#99" })).toBeDefined();
+  expect(await ui.find({ key: "pp-api-12-toggle" })).toBeDefined();
+});
+
+test("an open PR named with no record draws nothing", async ($, on) => {
+  stage($, on, {});
+  const ui = await reply($, "api#99 is ready for review.");
+  expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
+  expect(await ui.find({ type: "Button" })).toBe(undefined);
+});
+
+test("a reply naming five PRs draws a ▸ Proof button for each one with a record", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "AssistantMessage",
+    requestId: "five",
+    props: { text: "web#541, api#12, and three with no record: api#77, api#99, web#5.", isFirstOfReply: true },
+  });
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  expect(await ui.find({ key: "pp-api-12-toggle" })).toBeDefined();
+  const toggle = await ui.find({ key: "pp-api-12-toggle" });
+  expect(toggle?.props.label).toBe("▸ Proof");
 });
 

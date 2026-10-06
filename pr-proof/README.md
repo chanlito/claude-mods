@@ -1,6 +1,6 @@
 # pr-proof
 
-Shows what an agent verified on a PR, under the reply that names it. When Claude writes "shop-web#541 is ready for review", pr-proof adds **▸ Reveal proof**. The same button goes under Claude Code's own "Created PR #541" line, found from the URL `gh pr create` printed. Press it to see:
+Shows what an agent verified on a PR, under the reply that names it. When Claude writes "shop-web#541 is ready for review", pr-proof adds **▸ Proof**. The same button goes under Claude Code's own "Created PR #541" line, found from the URL `gh pr create` printed. Press it to see:
 
 - each change on screen as a before and after picture, outlined in red where it changed;
 - every check with where it ran and whether it passed, failed or was skipped;
@@ -15,7 +15,7 @@ pr-proof reads `<root>/<repo>/<pr>/proof.json` and the files beside it, `<root>`
 
 The plugin ships the `record-proof` skill, which tells Claude how to write the record and outline its screenshots while it verifies. The record's shape is in [`skills/record-proof/SKILL.md`](./skills/record-proof/SKILL.md).
 
-An open PR named with no record gets one line instead, **! No proof recorded**, so a missing proof shows as missing; a merged or closed PR, and a bare `#541`, get nothing. A PR opened with `gh pr create` and no record yet gets one line in the model's context saying so, so the record is written while the checks are fresh.
+A PR opened with `gh pr create` and no record yet gets one line in the model's context saying so, so the record is written while the checks are fresh.
 
 `bin/publish-pictures.sh <owner/repo> <pr> <picture>...` puts a record's pictures on the repo's orphan `pr-proof` branch and prints the before/after table for the PR's description.
 

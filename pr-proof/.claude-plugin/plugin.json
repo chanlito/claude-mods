@@ -1,6 +1,6 @@
 {
   "name": "pr-proof",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "description": "Shows the proof behind a PR under the reply that names it: checks, before/after screenshots, what was not checked, with Open and Reveal buttons",
   "author": {
     "name": "Chanlito Hem"
