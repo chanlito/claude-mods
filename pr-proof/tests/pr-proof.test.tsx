@@ -172,7 +172,8 @@ test("a reply naming a PR with a record gets the button, closed", async ($, on) 
   const ui = await reply($, "web#541 is ready for review.");
   expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
   expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
-  expect(await ui.find({ type: "Text", text: /shop-web#541 · 3 checks · 2 changes · 1 failed · 1 not checked/ })).toBeDefined();
+  // The row sits under the PR's name: it names it again only beside another PR's button.
+  expect(await ui.find({ type: "Text", text: /shop-web#541|3 checks/ })).toBe(undefined);
   expect(await ui.find({ key: "pp-shop-web-541-details" })).toBe(undefined);
 });
 
@@ -467,3 +468,26 @@ for (const [columns, width] of [[undefined, 44], [100, 46], [200, 80]] as const)
     expect(await ui.find({ key: "img-pp-shop-web-541-c0-after" })).toBeDefined();
   });
 }
+
+test("a second Hide at the foot of an open proof closes it", async ($, on) => {
+  stage($, on, {});
+  const ui = await reply($, "web#541 is ready.");
+  await ui.press({ key: "pp-shop-web-541-toggle" });
+  expect(await ui.find({ key: "pp-shop-web-541-details" })).toBeDefined();
+  await ui.press({ key: "pp-shop-web-541-hide" });
+  expect(await ui.find({ key: "pp-shop-web-541-details" })).toBe(undefined);
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+});
+
+test("a reply naming two recorded PRs labels each button", async ($, on) => {
+  stage($, on, {});
+  const ui = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "AssistantMessage",
+    requestId: "two-prs",
+    props: { text: "web#541 and api#12 are ready.", isFirstOfReply: true },
+  });
+  expect(await ui.find({ type: "Text", text: "shop-web#541" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "api#12" })).toBeDefined();
+});

@@ -422,7 +422,14 @@ async function picture(
   );
 }
 
-async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: string, mode: Mode) {
+async function details(
+  $: EngineInterface,
+  e: RenderInput,
+  r: ProofRecord,
+  id: string,
+  mode: Mode,
+  hide: () => void,
+) {
   const { Box, Text, Button, Link } = $.ui.resolve(e);
   const counts = { pass: 0, fail: 0, skip: r.notChecked.length };
   for (const c of r.checks) counts[c.result]++;
@@ -487,6 +494,8 @@ async function details($: EngineInterface, e: RenderInput, r: ProofRecord, id: s
         </Box>
       )}
       <Box flexDirection="row" gap={2}>
+        {/* A second Hide at the foot, so an open proof taller than the screen closes without scrolling back up. */}
+        <Button key={`${id}-hide`} label="▴ Hide proof" onPress={hide} />
         <Button
           key={`${id}-folder`}
           label="Reveal folder"
@@ -531,23 +540,18 @@ async function withProof(
     const id = `${r.dir}@${e.requestId}`;
     const isOpen = opened.includes(id);
     const key = `pp-${r.repoDir}-${r.pr}`;
+    const toggle = () =>
+      void update($, open, (list) =>
+        list.includes(id) ? list.filter((x) => x !== id) : [...list, id].slice(-40),
+      );
     blocks.push(
       <Box key={key} flexDirection="column" paddingLeft={2}>
         <Box flexDirection="row" gap={1}>
-          <Button
-            key={`${key}-toggle`}
-            label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"}
-            onPress={() =>
-              void update($, open, (list) =>
-                list.includes(id) ? list.filter((x) => x !== id) : [...list, id].slice(-40),
-              )
-            }
-          />
-          <Text dimColor>
-            {labelOf(r)} · {countsOf(r)}
-          </Text>
+          <Button key={`${key}-toggle`} label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"} onPress={toggle} />
+          {/* The row sits under the line that names the PR: its name only tells two buttons apart. */}
+          {found.length > 1 && <Text dimColor>{labelOf(r)}</Text>}
         </Box>
-        {isOpen && (await details($, e, r, key, mode))}
+        {isOpen && (await details($, e, r, key, mode, toggle))}
       </Box>,
     );
   }
