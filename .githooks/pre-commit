@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Validates and tests every mod the commit touches, and the marketplace when
+# its listing changes. A mod's checks are its `claude plugin test` suite and
+# any tests/*.sh beside it.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[[ -n $staged ]] || exit 0
+
+if grep -q '^\.claude-plugin/' <<<"$staged"; then
+  echo "pre-commit: claude plugin validate ."
+  claude plugin validate . >/dev/null
+fi
+
+for mod in $(cut -d/ -f1 <<<"$staged" | sort -u); do
+  [[ -f $mod/.claude-plugin/plugin.json ]] || continue
+  echo "pre-commit: $mod"
+  out=$(claude plugin validate "$mod" 2>&1) || { echo "$out"; exit 1; }
+  if [[ -d $mod/tests ]]; then
+    out=$(claude plugin test "$mod" 2>&1) || { echo "$out" | grep -E '^\(fail\)|Error|pass$|fail$'; exit 1; }
+    for t in "$mod"/tests/*.sh; do
+      [[ -e $t ]] || continue
+      bash "$t" || { echo "pre-commit: $t failed"; exit 1; }
+    done
+  fi
+done

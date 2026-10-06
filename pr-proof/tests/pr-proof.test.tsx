@@ -491,3 +491,18 @@ test("a reply naming two recorded PRs labels each button", async ($, on) => {
   expect(await ui.find({ type: "Text", text: "shop-web#541" })).toBeDefined();
   expect(await ui.find({ type: "Text", text: "api#12" })).toBeDefined();
 });
+
+test("a PR opened with no record tells the model so, once, in the call's context", async ($, on) => {
+  stage($, on, {});
+  on("tool.call", () => ({ result: { stdout: "https://github.com/acme/api/pull/77\n", stderr: "" } }));
+  const ran = await $.tool.call({ tool: "Bash", command: "gh pr create --fill" });
+  expect(ran.context?.join("\n")).toMatch(/no proof record for api#77 yet/);
+});
+
+test("a PR opened with its record already written adds nothing", async ($, on) => {
+  stage($, on, {});
+  on("tool.call", () => ({ result: { stdout: `${PR_URL}\n`, stderr: "" } }));
+  const ran = await $.tool.call({ tool: "Bash", command: "gh pr create --fill" });
+  expect(ran.context ?? []).toEqual([]);
+});
+

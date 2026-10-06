@@ -665,6 +665,23 @@ export const register: Register = (on, options) => {
           return keys.length ? [...list, ...keys].slice(-100) : list;
         });
       }
+      // A PR opened with no record yet: say so to the model once, while the
+      // verification is fresh, rather than when someone asks for the proof.
+      const created = /\bgh\s+pr\s+create\b/.test(input) ? findUrlRefs(output) : [];
+      if (created.length > 0) {
+        const records = await recordsIn($, root, true);
+        const missing = created.filter((r) => resolveRefs([r], records, undefined).length === 0);
+        if (missing.length > 0) {
+          const names = missing.map((r) => `${r.name}#${r.pr}`).join(", ");
+          return {
+            ...ran,
+            context: [
+              ...(ran.context ?? []),
+              `pr-proof: no proof record for ${names} yet. Write it with the pr-proof:record-proof skill from the checks you ran, before reporting the PR ready.`,
+            ],
+          };
+        }
+      }
     } catch {
       // Bookkeeping only: never fail the call over it.
     }
