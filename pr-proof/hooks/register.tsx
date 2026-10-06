@@ -323,6 +323,61 @@ function newestMention(dir: string, instance: string): { isNewest: boolean; disp
   return { isNewest: (mentions.get(dir) ?? []).at(-1) === instance, displaced: isNew && list.length > 0 };
 }
 
+/** How long an open PR's state is trusted before `gh` is asked again; a merged one is final. */
+const OPEN_STATE_TTL_MS = 5 * 60_000;
+/** How long a drawing waits on `gh` before drawing the button and checking behind it. */
+const STATE_WAIT_MS = 1_500;
+
+const prStates = new Map<string, { at: number; merged: Promise<boolean> }>();
+
+/**
+ * Whether the record's PR is merged, from `gh`: its proof is then history, not
+ * something to review, so it draws no button. A record without `owner/name`,
+ * or a `gh` that cannot answer, counts as open.
+ */
+async function askMerged($: EngineInterface, r: ProofRecord): Promise<boolean> {
+  if (!r.repo || !/^[\w.-]+\/[\w.-]+$/.test(r.repo)) return false;
+  try {
+    const { exitCode, stdout } = await $.process.run(
+      ["gh", "api", `repos/${r.repo}/pulls/${r.pr}`, "--jq", ".merged_at // \"\""],
+      { timeoutMs: 10_000 },
+    );
+    return exitCode === 0 && stdout.trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
+/** The record's PR state if `gh` answers soon, else `false` and a redraw once it does. */
+async function isMerged($: EngineInterface, r: ProofRecord): Promise<boolean> {
+  const now = await $.clock.now();
+  let known = prStates.get(r.dir);
+  if (!known || now - known.at > OPEN_STATE_TTL_MS) {
+    const merged = askMerged($, r);
+    known = { at: now, merged };
+    prStates.set(r.dir, known);
+    merged.then((m) => {
+      // A merged PR stays merged: keep the answer for the session.
+      if (m) prStates.set(r.dir, { at: Number.MAX_SAFE_INTEGER, merged });
+    });
+  }
+  const late = Symbol("late");
+  const wait = new AbortController();
+  const answer = await Promise.race([
+    known.merged,
+    new Promise<typeof late>((resolve) =>
+      void $.clock.sleep(STATE_WAIT_MS, { signal: wait.signal }).then(
+        () => resolve(late),
+        () => undefined,
+      ),
+    ),
+  ]);
+  wait.abort();
+  if (answer !== late) return answer;
+  void known.merged.then((m) => m && $.ui.invalidate("ui.render"));
+  return false;
+}
+
 let index: { at: number; root: string; records: Promise<ProofRecord[]> } | undefined;
 
 async function scan($: EngineInterface, root: string): Promise<ProofRecord[]> {
@@ -519,7 +574,10 @@ async function withProof(
   const root = await rootOf($, settings.root);
   const instance = `${e.component}:${e.requestId}`;
   let displaced = false;
-  const found = resolveRefs(refs, await recordsIn($, root), await repoHere($))
+  const named = resolveRefs(refs, await recordsIn($, root), await repoHere($));
+  const unmerged = [];
+  for (const r of named) if (!(await isMerged($, r))) unmerged.push(r);
+  const found = unmerged
     .filter((r) => {
       const newest = newestMention(r.dir, instance);
       displaced ||= newest.displaced;
@@ -665,10 +723,16 @@ export const register: Register = (on, options) => {
           return keys.length ? [...list, ...keys].slice(-100) : list;
         });
       }
+      // A merge just happened: every cached state may be stale, and the rows
+      // under a PR that is now merged draw again without their button.
+      if (/\bgh\s+pr\s+merge\b/.test(input) && ran.deny === undefined) {
+        prStates.clear();
+        $.ui.invalidate("ui.render");
+      }
       // A PR opened with no record yet: say so to the model once, while the
       // verification is fresh, rather than when someone asks for the proof.
       const created = /\bgh\s+pr\s+create\b/.test(input) ? findUrlRefs(output) : [];
-      if (created.length > 0) {
+      if (created.length > 0 && ran.deny === undefined && ran.isError !== true) {
         const records = await recordsIn($, root, true);
         const missing = created.filter((r) => resolveRefs([r], records, undefined).length === 0);
         if (missing.length > 0) {
