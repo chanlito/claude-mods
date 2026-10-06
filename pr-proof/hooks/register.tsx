@@ -328,43 +328,46 @@ const OPEN_STATE_TTL_MS = 5 * 60_000;
 /** How long a drawing waits on `gh` before drawing the button and checking behind it. */
 const STATE_WAIT_MS = 1_500;
 
-const prStates = new Map<string, { at: number; merged: Promise<boolean> }>();
+/** Where a PR stands: open (worth reviewing), done (merged or closed), or no PR `gh` can find. */
+type PrState = "open" | "done" | "unknown";
 
-/**
- * Whether the record's PR is merged, from `gh`: its proof is then history, not
- * something to review, so it draws no button. A record without `owner/name`,
- * or a `gh` that cannot answer, counts as open.
- */
-async function askMerged($: EngineInterface, r: ProofRecord): Promise<boolean> {
-  if (!r.repo || !/^[\w.-]+\/[\w.-]+$/.test(r.repo)) return false;
+const prStates = new Map<string, { at: number; state: Promise<PrState> }>();
+
+async function askState($: EngineInterface, slug: string, pr: number): Promise<PrState> {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(slug)) return "unknown";
   try {
     const { exitCode, stdout } = await $.process.run(
-      ["gh", "api", `repos/${r.repo}/pulls/${r.pr}`, "--jq", ".merged_at // \"\""],
+      ["gh", "api", `repos/${slug}/pulls/${pr}`, "--jq", ".state"],
       { timeoutMs: 10_000 },
     );
-    return exitCode === 0 && stdout.trim() !== "";
+    if (exitCode !== 0) return "unknown";
+    return stdout.trim() === "open" ? "open" : "done";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
-/** The record's PR state if `gh` answers soon, else `false` and a redraw once it does. */
-async function isMerged($: EngineInterface, r: ProofRecord): Promise<boolean> {
+/**
+ * The PR's state if `gh` answers within STATE_WAIT_MS, else `whileWaiting`
+ * and a redraw once it answers. A done PR stays done, so its answer is kept
+ * for the session; any other is asked again after OPEN_STATE_TTL_MS.
+ */
+async function prState($: EngineInterface, slug: string, pr: number, whileWaiting: PrState): Promise<PrState> {
+  const key = `${slug}#${pr}`;
   const now = await $.clock.now();
-  let known = prStates.get(r.dir);
+  let known = prStates.get(key);
   if (!known || now - known.at > OPEN_STATE_TTL_MS) {
-    const merged = askMerged($, r);
-    known = { at: now, merged };
-    prStates.set(r.dir, known);
-    merged.then((m) => {
-      // A merged PR stays merged: keep the answer for the session.
-      if (m) prStates.set(r.dir, { at: Number.MAX_SAFE_INTEGER, merged });
+    const state = askState($, slug, pr);
+    known = { at: now, state };
+    prStates.set(key, known);
+    void state.then((st) => {
+      if (st === "done") prStates.set(key, { at: Number.MAX_SAFE_INTEGER, state });
     });
   }
   const late = Symbol("late");
   const wait = new AbortController();
   const answer = await Promise.race([
-    known.merged,
+    known.state,
     new Promise<typeof late>((resolve) =>
       void $.clock.sleep(STATE_WAIT_MS, { signal: wait.signal }).then(
         () => resolve(late),
@@ -374,8 +377,29 @@ async function isMerged($: EngineInterface, r: ProofRecord): Promise<boolean> {
   ]);
   wait.abort();
   if (answer !== late) return answer;
-  void known.merged.then((m) => m && $.ui.invalidate("ui.render"));
-  return false;
+  void known.state.then((st) => st !== whileWaiting && $.ui.invalidate("ui.render"));
+  return whileWaiting;
+}
+
+let remoteOwner: Promise<string | undefined> | undefined;
+
+/** The owner in this checkout's `origin` (github.com), a guess for a PR named without one. */
+async function ownerHere($: EngineInterface): Promise<string | undefined> {
+  remoteOwner ??= $.process
+    .run(["git", "remote", "get-url", "origin"])
+    .then((r) => (r.exitCode === 0 ? /github\.com[:/]([\w.-]+)\//.exec(r.stdout)?.[1] : undefined))
+    .catch(() => undefined);
+  return remoteOwner;
+}
+
+/** `owner/name` for a named PR: its own owner, a record's of that repo, else this checkout's. */
+async function slugOf($: EngineInterface, ref: Ref, records: ProofRecord[]): Promise<string | undefined> {
+  if (!ref.name) return undefined;
+  if (ref.owner) return `${ref.owner}/${ref.name}`;
+  const known = records.find((r) => r.repo?.split("/")[1] === ref.name || r.repoDir === ref.name)?.repo;
+  if (known?.includes("/")) return `${known.split("/")[0]}/${ref.name}`;
+  const owner = await ownerHere($);
+  return owner ? `${owner}/${ref.name}` : undefined;
 }
 
 let index: { at: number; root: string; records: Promise<ProofRecord[]> } | undefined;
@@ -574,19 +598,36 @@ async function withProof(
   const root = await rootOf($, settings.root);
   const instance = `${e.component}:${e.requestId}`;
   let displaced = false;
-  const named = resolveRefs(refs, await recordsIn($, root), await repoHere($));
-  const unmerged = [];
-  for (const r of named) if (!(await isMerged($, r))) unmerged.push(r);
-  const found = unmerged
-    .filter((r) => {
-      const newest = newestMention(r.dir, instance);
-      displaced ||= newest.displaced;
-      return newest.isNewest;
-    })
-    .slice(0, MAX_PER_REPLY);
+  const records = await recordsIn($, root);
+  const here = await repoHere($);
+  const named = resolveRefs(refs, records, here);
+  // A record's proof is worth a button while its PR is open; a done PR's is history.
+  const live = [];
+  for (const r of named) {
+    if (!r.repo?.includes("/") || (await prState($, r.repo, r.pr, "open")) !== "done") live.push(r);
+  }
+  // An open PR named with no record: one warning line, so a missing proof shows
+  // as missing rather than as nothing. Bare #n is left out: it is as often an issue.
+  const missing: { slug: string; pr: number }[] = [];
+  for (const ref of refs) {
+    if (!ref.name || resolveRefs([ref], records, here).length > 0) continue;
+    const slug = await slugOf($, ref, records);
+    if (slug && !missing.some((m) => m.slug === slug && m.pr === ref.pr)) {
+      if ((await prState($, slug, ref.pr, "unknown")) === "open") missing.push({ slug, pr: ref.pr });
+    }
+  }
+  const newestOnly = (id: string) => {
+    const newest = newestMention(id, instance);
+    displaced ||= newest.displaced;
+    return newest.isNewest;
+  };
+  const found = live.filter((r) => newestOnly(r.dir)).slice(0, MAX_PER_REPLY);
+  const unproven = missing
+    .filter((m) => newestOnly(`missing:${m.slug}#${m.pr}`))
+    .slice(0, Math.max(0, MAX_PER_REPLY - found.length));
   // The rows that drew this record's button before draw again, without it.
   if (displaced) $.ui.invalidate("ui.render");
-  if (found.length === 0) return engineRow();
+  if (found.length === 0 && unproven.length === 0) return engineRow();
 
   const { Box, Text, Button } = $.ui.resolve(e);
   const own = await engineRow();
@@ -607,9 +648,18 @@ async function withProof(
         <Box flexDirection="row" gap={1}>
           <Button key={`${key}-toggle`} label={isOpen ? "▾ Hide proof" : "▸ Reveal proof"} onPress={toggle} />
           {/* The row sits under the line that names the PR: its name only tells two buttons apart. */}
-          {found.length > 1 && <Text dimColor>{labelOf(r)}</Text>}
+          {found.length + unproven.length > 1 && <Text dimColor>{labelOf(r)}</Text>}
         </Box>
         {isOpen && (await details($, e, r, key, mode, toggle))}
+      </Box>,
+    );
+  }
+  for (const m of unproven) {
+    const name = m.slug.split("/")[1];
+    blocks.push(
+      <Box key={`pp-missing-${name}-${m.pr}`} flexDirection="row" gap={1} paddingLeft={2}>
+        <Text color="warning">! No proof recorded</Text>
+        {found.length + unproven.length > 1 && <Text dimColor>{`${name}#${m.pr}`}</Text>}
       </Box>,
     );
   }
