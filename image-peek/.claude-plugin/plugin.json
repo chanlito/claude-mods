@@ -1,6 +1,6 @@
 {
   "name": "image-peek",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Previews pasted images and images Claude sends, with Open and Reveal buttons (Explorer on WSL/Windows, Finder on macOS)",
   "author": {
     "name": "Chanlito Hem"

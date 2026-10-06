@@ -68,16 +68,19 @@ test("anything else has no preview", () => {
 });
 
 const PATH = "/home/me/shots/chart.png";
+const PHOTO = "/home/me/shots/photo.jpg";
 const WINDOWS_PATH = "\\\\wsl.localhost\\Ubuntu\\home\\me\\shots\\chart.png";
 
-/** Claude sends PATH; answers the mounted card and what ran on the host. */
+/** Claude sends an image; answers the mounted card and what ran on the host. */
 async function sendImage(
   $: Engine,
   on: On,
   env: Record<string, string>,
   uname = "Linux",
+  { path = PATH, converts = true } = {},
 ) {
   mock.env(on, { HOME: "/home/me", ...env });
+  mock.clock(on);
   const ran: string[][] = [];
   const toasts: string[] = [];
   const answer = (exitCode: number, stdout: string) => ({
@@ -91,6 +94,9 @@ async function sendImage(
   });
   on("process.run", (_$, e) => {
     ran.push([...e.argv]);
+    // A PNG copy written into the mod's own folder.
+    if (e.argv[0] === "sh" && e.argv[5]?.startsWith("/home/me/.claude/"))
+      return answer(converts ? 0 : 1, "");
     if (e.argv[0] === "sh") return answer(0, `640 960\n${toBase64(PPM)}`);
     if (e.argv[0] === "wslpath") return answer(0, `${WINDOWS_PATH}\n`);
     if (e.argv[0] === "uname") return answer(0, `${uname}\n`);
@@ -109,11 +115,11 @@ async function sendImage(
   on("tool.call", { tool: "SendUserFile" }, (_$, e) => {
     callId = e.tool_use_id;
     return {
-      result: { attachments: [{ path: PATH, size: 10, isImage: true }] },
+      result: { attachments: [{ path, size: 10, isImage: true }] },
     };
   });
 
-  await $.tool.call({ tool: "SendUserFile", files: [PATH], status: "normal" });
+  await $.tool.call({ tool: "SendUserFile", files: [path], status: "normal" });
 
   const ui = await $.ui.mount({
     plugin: "image-peek",
@@ -123,13 +129,13 @@ async function sendImage(
     props: {
       tool_use_id: callId,
       tool: "SendUserFile",
-      input: { files: [PATH] },
+      input: { files: [path] },
       isRunning: false,
       isErrored: false,
       isInterrupted: false,
     },
   });
-  return { ui, ran, toasts };
+  return { ui, ran, toasts, callId };
 }
 
 test("on WSL, Reveal selects the image in Explorer and Open opens it", async ($, on) => {
@@ -172,6 +178,41 @@ test("in Ghostty the image itself is drawn, sized to its shape", async ($, on) =
     rows: 24,
   });
   expect(await ui.find({ key: "preview-1" })).toBe(undefined);
+});
+
+test("in Ghostty a JPEG is drawn from a PNG copy in the mod's folder", async ($, on) => {
+  const { ui, ran, callId } = await sendImage(
+    $,
+    on,
+    { TERM_PROGRAM: "ghostty" },
+    "Linux",
+    { path: PHOTO },
+  );
+  const png = `/home/me/.claude/image-peek/1970-01-01/${callId}-1.png`;
+  const copy = ran.find((argv) => argv[0] === "sh" && argv[5] === png);
+  // The decoder is forced from the extension here too.
+  expect(copy?.slice(4)).toEqual([PHOTO, png, "jpeg"]);
+  expect((await ui.find({ key: "image-1" }))?.props).toMatchObject({
+    source: { file: png, format: "png" },
+  });
+  expect(await ui.find({ key: "preview-1" })).toBe(undefined);
+  // Open and Reveal still act on the file Claude sent.
+  await ui.press({ key: "open-1" });
+  expect(ran.at(-1)).toEqual(["xdg-open", PHOTO]);
+});
+
+test("in Ghostty a JPEG whose PNG copy fails is drawn as blocks", async ($, on) => {
+  const { ui } = await sendImage($, on, { TERM_PROGRAM: "ghostty" }, "Linux", {
+    path: PHOTO,
+    converts: false,
+  });
+  expect(await ui.find({ key: "image-1" })).toBe(undefined);
+  expect(await ui.find({ key: "preview-1" })).toBeDefined();
+});
+
+test("outside a graphics terminal no PNG copy is written", async ($, on) => {
+  const { ran } = await sendImage($, on, {}, "Linux", { path: PHOTO });
+  expect(ran.filter((argv) => argv[0] === "sh")).toHaveLength(1);
 });
 
 test("in Ghostty behind a multiplexer the blocks are drawn", async ($, on) => {

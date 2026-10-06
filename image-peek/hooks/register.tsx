@@ -16,6 +16,9 @@ const KEEP = 60;
 const images = atom({ plugin: "image-peek", key: "images" } as const, []);
 const seq = atom({ plugin: "image-peek", key: "seq" } as const, 0);
 
+/** Windows' own convert.exe (FAT to NTFS) is on a WSL PATH: not ImageMagick. */
+const HAS = `has() { p=$(command -v "$1" 2>/dev/null) && case "$p" in /mnt/*) false ;; esac; }`;
+
 /**
  * Prints `<w> <h>` (or `<w>x<h>`) on one line, then the thumbnail as base64
  * on the next: a PPM from ImageMagick or ffmpeg, a BMP from macOS's sips.
@@ -29,8 +32,7 @@ const seq = atom({ plugin: "image-peek", key: "seq" } as const, 0);
 const PREVIEW_SCRIPT = `
 f="$1"; w="$2"; h="$3"; t="$4"
 case "$f" in /*) ;; *) exit 2 ;; esac
-# Windows' own convert.exe (FAT to NTFS) is on a WSL PATH: not ImageMagick.
-has() { p=$(command -v "$1" 2>/dev/null) && case "$p" in /mnt/*) false ;; esac; }
+${HAS}
 if has magick; then
   magick identify -format "%w %h\\n" "$t:$f[0]" 2>/dev/null | head -n 1
   magick "$t:$f[0]" -auto-orient -thumbnail "\${w}x\${h}" -background "#000000" -alpha remove -alpha off -depth 8 ppm:- | base64 | tr -d '\\n'
@@ -54,6 +56,30 @@ elif has sips; then
 else
   exit 3
 fi
+`;
+
+/**
+ * Writes "$2", a PNG of "$1"'s first frame, for the terminal to draw: it reads
+ * the file itself, and only a PNG. The decoder is forced from "$3" as in
+ * PREVIEW_SCRIPT, and the PNG lands whole or not at all.
+ */
+const PNG_SCRIPT = `
+f="$1"; o="$2"; t="$3"; part="$2.part.png"
+case "$f" in /*) ;; *) exit 2 ;; esac
+mkdir -p "$(dirname "$o")" || exit 1
+${HAS}
+if has magick; then
+  magick "$t:$f[0]" -auto-orient "png:$part"
+elif has convert; then
+  convert "$t:$f[0]" -auto-orient "png:$part"
+elif has ffmpeg; then
+  ffmpeg -v error -protocol_whitelist file -i "file:$f" -frames:v 1 -f image2pipe -vcodec png - > "$part"
+elif has sips; then
+  sips -s format png "$f" --out "$part" >/dev/null 2>&1
+else
+  false
+fi && [ -s "$part" ] && mv -f "$part" "$o"
+ok=$?; rm -f "$part"; exit $ok
 `;
 
 /**
@@ -247,9 +273,11 @@ const PREVIEW_FORMATS: Record<string, string> = {
   bmp: "bmp",
 };
 
+const formatOf = (path: string): string | undefined =>
+  PREVIEW_FORMATS[path.split(".").at(-1)?.toLowerCase() ?? ""];
+
 async function thumbnail($: EngineInterface, path: string): Promise<Thumbnail> {
-  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
-  const format = PREVIEW_FORMATS[extension];
+  const format = formatOf(path);
   if (!path.startsWith("/") || !format) return {};
   try {
     const { exitCode, stdout } = await $.process.run(
@@ -280,6 +308,36 @@ async function thumbnail($: EngineInterface, path: string): Promise<Thumbnail> {
   }
 }
 
+/**
+ * Writes a PNG copy of a non-PNG image, as `name` in today's folder, when
+ * images are drawn sharp, and answers its path; nothing when it is a PNG
+ * already or the copy failed, which leaves the half-block preview.
+ */
+async function pngCopy(
+  $: EngineInterface,
+  path: string,
+  name: string,
+  setting: string,
+): Promise<{ png?: string }> {
+  const format = formatOf(path);
+  if (!path.startsWith("/") || !format || format === "png") return {};
+  if ((await previewMode($, setting)) !== "image") return {};
+  const out = `${await todayDir($)}/${name}`;
+  const made = await $.process
+    .run(["sh", "-c", PNG_SCRIPT, "sh", path, out, format], {
+      timeoutMs: 30_000,
+    })
+    .catch(() => ({ exitCode: 1 }));
+  return made.exitCode === 0 ? { png: out } : {};
+}
+
+/** Where the mod keeps its files today: pasted images and PNG copies. */
+async function todayDir($: EngineInterface) {
+  const home = await $.env.get("HOME");
+  const day = new Date(await $.clock.now()).toISOString().slice(0, 10);
+  return `${home ?? "/tmp"}/.claude/image-peek/${day}`;
+}
+
 /** Numbers the images and adds them to the session's list. */
 async function remember($: EngineInterface, found: Omit<PeekImage, "n">[]) {
   if (found.length === 0) return;
@@ -308,13 +366,14 @@ async function cards(
 
   return mine.map((img) => {
     // The terminal reads the file itself, and only a PNG.
-    const box = sharp && /\.png$/i.test(img.path) ? imageBox(img) : undefined;
+    const png = /\.png$/i.test(img.path) ? img.path : img.png;
+    const box = sharp && png ? imageBox(img) : undefined;
     return (
     <Box key={`card-${img.n}`} flexDirection="column" paddingLeft={2}>
-      {Image && box && (
+      {Image && box && png && (
         <Image
           key={`image-${img.n}`}
-          source={{ file: img.path, format: "png" }}
+          source={{ file: png, format: "png" }}
           columns={box.columns}
           rows={box.rows}
           alt={`${img.label} (${img.width}×${img.height})`}
@@ -400,15 +459,14 @@ export const register: Register = (on, options) => {
     const blocks = content.filter(isImageBlock);
     if (blocks.length === 0 || e.agentId) return stored;
 
-    const home = await $.env.get("HOME");
-    const day = new Date(await $.clock.now()).toISOString().slice(0, 10);
+    const dir = await todayDir($);
     const prompt = textOf(content);
     const numbers = [...prompt.matchAll(/\[Image #(\d+)\]/g)].map((m) => m[1]);
 
     const found: Omit<PeekImage, "n">[] = [];
     for (const [i, block] of blocks.entries()) {
       const name = `${e.uuid.slice(0, 8)}-${i + 1}.${extensionFor(block.source.media_type)}`;
-      const path = `${home ?? "/tmp"}/.claude/image-peek/${day}/${name}`;
+      const path = `${dir}/${name}`;
       const saved = await $.process
         .run(["sh", "-c", SAVE_SCRIPT, "sh", path], {
           stdin: block.source.data,
@@ -423,6 +481,7 @@ export const register: Register = (on, options) => {
         label: `Image #${numbers[i] ?? i + 1}`,
         from: "pasted",
         ...(await thumbnail($, path)),
+        ...(await pngCopy($, path, name.replace(/\.[^.]*$/, ".png"), setting)),
       });
     }
     await remember($, found);
@@ -442,7 +501,7 @@ export const register: Register = (on, options) => {
       : e.files.filter(isImagePath);
 
     const found: Omit<PeekImage, "n">[] = [];
-    for (const given of paths) {
+    for (const [i, given] of paths.entries()) {
       // Open, Reveal and the preview only ever get an absolute path.
       const path = given.startsWith("/")
         ? given
@@ -458,6 +517,7 @@ export const register: Register = (on, options) => {
         label: path.split("/").at(-1) ?? path,
         from: "claude",
         ...(await thumbnail($, path)),
+        ...(await pngCopy($, path, `${e.tool_use_id}-${i + 1}.png`, setting)),
       });
     }
     await remember($, found);

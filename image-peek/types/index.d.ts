@@ -18,6 +18,8 @@ export type PeekImage = {
   width?: number
   height?: number
   preview?: PeekPreview
+  /** A PNG copy of a non-PNG image, the file a sharp image is drawn from. */
+  png?: string
 }
 
 declare module 'claude-code' {
