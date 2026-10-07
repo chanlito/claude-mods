@@ -23,7 +23,9 @@ for mod in $(cut -d/ -f1 <<<"$staged" | sort -u); do
   # one contract. None anywhere: say so and let the tests stand alone.
   if [[ -f $mod/tsconfig.json ]]; then
     if [[ ! -d $mod/.claude-plugin/types/claude-code ]]; then
-      laid=$(ls -d */.claude-plugin/types 2>/dev/null | head -1)
+      # `|| true`: on a fresh clone nothing is laid, ls fails, and pipefail
+      # with set -e would end the hook here, silently.
+      laid=$(ls -d */.claude-plugin/types 2>/dev/null | head -1 || true)
       [[ -n $laid ]] && cp -r "$laid" "$mod/.claude-plugin/types"
     fi
     if [[ -d $mod/.claude-plugin/types/claude-code ]]; then

@@ -37,7 +37,13 @@ for src in "$@"; do
     *.jpg | *.jpeg | *.gif | *.webp) name=$base; cp "$src" "$WORK/$name" ;;
     *) echo "not a picture: $src" >&2; exit 1 ;;
   esac
-  sha=$(jq -n --rawfile c <(base64 -w0 "$WORK/$name") '{content: $c, encoding: "base64"}' |
+  # Unwrapped base64 on GNU and macOS alike: macOS has no `-w0`, and GNU wraps
+  # at 76 columns, so strip the newlines instead. Through a pipe into a file,
+  # not `<(…)`, so a failed encoder stops the script rather than posting an
+  # empty blob.
+  base64 <"$WORK/$name" | tr -d '\n' >"$WORK/$name.b64"
+  [[ -s $WORK/$name.b64 ]] || { echo "could not encode $src" >&2; exit 1; }
+  sha=$(jq -n --rawfile c "$WORK/$name.b64" '{content: $c, encoding: "base64"}' |
     gh api "repos/$REPO/git/blobs" --input - -q .sha)
   entries+=("$(jq -nc --arg p "$PR/$name" --arg s "$sha" '{path: $p, mode: "100644", type: "blob", sha: $s}')")
   names+=("$name")
