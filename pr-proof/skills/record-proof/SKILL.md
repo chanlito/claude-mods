@@ -3,7 +3,7 @@ name: record-proof
 description: Write the proof record for a PR as you verify it, with before/after screenshots outlined in red, so the person can reveal the proof under your "ready for review" reply. Use when you verify a change by running it (a device, a browser, a CLI) before reporting a PR ready.
 ---
 
-Every check you run lands in one record, `<records>/<repo>/<pr>/proof.json`, beside the files that show it. `<records>` is the folder the system prompt names for PR proof records (pr-proof's `root` setting, `~/pr-proof` unless changed). `<repo>` is the repository's name (`shop-web`), `<pr>` the PR's number. The person's pr-proof mod reads it and draws it under any reply that names the PR (`shop-web#541`, an alias, the PR's URL, or `#541` inside the repo).
+Every check you run lands in one record, `<records>/<repo>/<pr>/proof.json`, beside the files that show it. `<records>` is the folder the system prompt names for PR proof records (pr-proof's `root` setting, `~/pr-proof` unless changed). `<repo>` is the repository's name (`shop-web`), `<pr>` the PR's number. The person's pr-proof mod reads it and draws it under this session's replies that name the PR (`shop-web#541`, an alias, the PR's URL, or `#541` inside the repo); another session's record shows only once the person names the PR.
 
 ## Steps
 
@@ -36,6 +36,7 @@ Done when every claim in your report has a check in the record, every check on a
 {
   "repo": "acme/shop-web",
   "pr": 541,
+  "session": "<the id the system prompt gives>",
   "title": "Encrypt the local database",
   "url": "https://github.com/acme/shop-web/pull/541",
   "aliases": ["web"],
@@ -54,4 +55,5 @@ Done when every claim in your report has a check in the record, every check on a
 - File names are relative to the record's folder; a name with `..` or a leading `/` is ignored.
 - `result` is `pass`, `fail` or `skip`. A failed check stays in the record after the fix, followed by the check that passed.
 - `aliases` are other names the PR goes by in chat, such as `web` for `web#541`.
+- `session` is the id the system prompt gives beside the records folder. It marks the record as this session's, so another session that mentions the PR in passing does not draw it.
 - Pictures are PNG, JPEG, GIF, WebP or BMP. In kitty and Ghostty they show sharp; elsewhere as colored blocks.

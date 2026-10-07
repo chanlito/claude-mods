@@ -11,7 +11,7 @@ Pictures are sharp in kitty and Ghostty and drawn as colored blocks in other ter
 
 ## Records
 
-pr-proof reads `<root>/<repo>/<pr>/proof.json` and the files beside it, `<root>` being the `root` setting (`~/pr-proof` by default). It names that folder in the system prompt, so Claude writes records where the mod reads them. A reply finds a record by `repo#541`, `owner/repo#541`, an alias the record lists, the PR's GitHub URL, or a bare `#541` (when one record has that number, or inside that repo).
+pr-proof reads `<root>/<repo>/<pr>/proof.json` and the files beside it, `<root>` being the `root` setting (`~/pr-proof` by default). It names that folder in the system prompt, so Claude writes records where the mod reads them. A reply finds a record by `repo#541`, `owner/repo#541`, an alias the record lists, the PR's GitHub URL, or a bare `#541` (when one record has that number, or inside that repo). It draws only the session's own records: one whose `session` is this session's id (the system prompt gives it), one a call in it wrote or named by path, a PR it opened or edited with `gh pr`, or a PR you named in a prompt. Another session's PR, mentioned in passing, draws nothing. Of a PR's mentions, only the latest in the transcript keeps the button.
 
 The plugin ships the `record-proof` skill, which tells Claude how to write the record and outline its screenshots while it verifies. The record's shape is in [`skills/record-proof/SKILL.md`](./skills/record-proof/SKILL.md).
 
@@ -19,7 +19,7 @@ A PR opened with `gh pr create` and no record yet gets one line in the model's c
 
 `bin/publish-pictures.sh <owner/repo> <pr> <picture>...` puts a record's pictures on the repo's orphan `pr-proof` branch and prints the before/after table for the PR's description.
 
-`/proof` lists the records, this session's first (a PR a command in it printed, or a record a call in it wrote or named by path), then the others; `/proof repo#541` reveals one's folder.
+`/proof` lists the records, this session's own first, then the others; `/proof repo#541` reveals one's folder.
 
 ## Settings
 
