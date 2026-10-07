@@ -21,6 +21,8 @@ export type ProofRecord = {
   repoDir: string;
   /** `owner/name` when the record says so. */
   repo?: string;
+  /** The id of the session that wrote it, when the record says so. */
+  session?: string;
   pr: number;
   title?: string;
   url?: string;
@@ -73,6 +75,7 @@ export function parseRecord(
     dir,
     repoDir,
     repo: str(raw.repo),
+    session: str(raw.session),
     pr,
     title: str(raw.title),
     url: url && /^https?:\/\//.test(url) ? url : undefined,
@@ -170,14 +173,19 @@ export function outputText(tool: string, output: unknown): string {
   return typeof stdout === "string" ? stdout : "";
 }
 
+const GH_PR = /\bgh\s+pr\s+\w/;
+
+/** The `gh pr` calls that work on a PR rather than look at it. */
+export const GH_PR_CHANGE = /\bgh\s+pr\s+(?:create|edit|comment|ready)\b/;
+
 /**
  * What a `gh pr` call printed (create, edit, comment, ready: each prints the
  * PR's URL); "" for any other call, so a file's text or an API's JSON that
- * happens to hold a PR link draws no button.
+ * happens to hold a PR link draws no button. `verb` narrows the calls.
  */
-export function ghPrText(tool: string, input: unknown, output: unknown): string {
+export function ghPrText(tool: string, input: unknown, output: unknown, verb = GH_PR): string {
   const command = (input as { command?: unknown } | null)?.command;
-  if (typeof command !== "string" || !/\bgh\s+pr\s+\w/.test(command)) return "";
+  if (typeof command !== "string" || !verb.test(command)) return "";
   return outputText(tool, output);
 }
 

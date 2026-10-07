@@ -1,5 +1,5 @@
 import { atom, read, update } from "claude-code";
-import type { EngineInterface, Register, RenderElement, RenderInput } from "claude-code";
+import type { EngineInterface, PromptOrigin, Register, RenderElement, RenderInput } from "claude-code";
 
 import type { Preview } from "../types";
 import { decodePreview, fromBase64 } from "./preview";
@@ -8,6 +8,7 @@ import {
   findRecordPaths,
   findRefs,
   findUrlRefs,
+  GH_PR_CHANGE,
   ghPrText,
   labelOf,
   outputText,
@@ -38,6 +39,8 @@ function thumbWidthFor(columns: number | undefined): number {
 const INDEX_TTL_MS = 10_000;
 /** How many records one reply shows a button for. */
 const MAX_PER_REPLY = 5;
+/** The prompts the person sent: typed, from Remote Control, or pinged from Slack. */
+const PERSON = new Set<PromptOrigin["kind"]>(["composer", "bridge", "slack-ping"]);
 
 const open = atom({ plugin: "pr-proof", key: "open" } as const, []);
 const seen = atom({ plugin: "pr-proof", key: "seen" } as const, []);
@@ -308,19 +311,39 @@ function thumb($: EngineInterface, path: string, mode: Mode, width: number): Pro
 }
 
 /**
- * Each record's mentions, in the order they were first drawn: a reply, or a
- * `gh pr create` row. Only the newest draws the button, so one PR shows one.
- * A module variable, not `$.state`: a render hook cannot write, and a reload
- * draws every row again, which rebuilds it in the same order.
+ * Each row that names a PR, numbered the first time it is drawn naming one.
+ * Rows draw as the transcript adds them, so this is the transcript's order: a
+ * row drawn again later (at a scroll's edge, or once its record landed) keeps
+ * the place it had.
+ */
+const places = new Map<string, number>();
+
+function placeOf(instance: string): number {
+  let place = places.get(instance);
+  if (place === undefined) {
+    place = places.size;
+    places.set(instance, place);
+  }
+  return place;
+}
+
+/**
+ * Each record's mentions, in transcript order (placeOf): a reply, or a `gh pr`
+ * row. Only the newest draws the button, so one PR shows one. A module
+ * variable, not `$.state`: a render hook cannot write, and a reload draws
+ * every row again, which rebuilds it in the same order.
  */
 const mentions = new Map<string, string[]>();
 
-/** Whether `instance` is now the record's newest mention, and whether it just displaced an older one. */
+/** Whether `instance` is the record's newest mention, and whether it just took the button from an older one. */
 function newestMention(dir: string, instance: string): { isNewest: boolean; displaced: boolean } {
   const list = mentions.get(dir) ?? [];
-  const isNew = !list.includes(instance);
-  if (isNew) mentions.set(dir, [...list, instance].slice(-200));
-  return { isNewest: (mentions.get(dir) ?? []).at(-1) === instance, displaced: isNew && list.length > 0 };
+  if (list.includes(instance)) return { isNewest: list.at(-1) === instance, displaced: false };
+  // An older row that finds the record only now (it was drawn before the record was written) goes in its place, not last.
+  const next = [...list, instance].sort((a, b) => placeOf(a) - placeOf(b)).slice(-200);
+  mentions.set(dir, next);
+  const isNewest = next.at(-1) === instance;
+  return { isNewest, displaced: isNewest && list.length > 0 };
 }
 
 /** How long an open PR's state is trusted before `gh` is asked again; a merged one is final. */
@@ -418,6 +441,35 @@ async function repoHere($: EngineInterface): Promise<string | undefined> {
     .then((r) => (r.exitCode === 0 ? r.stdout.trim().split("/").at(-1) : undefined))
     .catch(() => undefined);
   return here;
+}
+
+/**
+ * The records that are this session's to show, the ones it touched first: a
+ * PR it opened or changed with `gh pr`, a record whose folder a call named, a
+ * PR the person named in a prompt (all kept in `seen`), then a record whose
+ * `session` is this one. `also` adds PRs the row itself shows are this
+ * session's. Another session's record, mentioned in passing, is not among them.
+ */
+async function ownRecords(
+  $: EngineInterface,
+  records: ProofRecord[],
+  here?: string,
+  also: Ref[] = [],
+): Promise<ProofRecord[]> {
+  const refs = (await read($, seen)).map(parseRefKey).filter((r): r is Ref => !!r);
+  const touched = resolveRefs([...also, ...refs], records, here);
+  const id = await $.session.id().catch(() => undefined);
+  return [...touched, ...records.filter((r) => id && r.session === id && !touched.includes(r))];
+}
+
+/** Adds PRs to the session's own, writing only when one is new so the rows reading them redraw only then. */
+async function addSeen($: EngineInterface, refs: Ref[]): Promise<void> {
+  const list = await read($, seen);
+  if (refs.every((r) => list.includes(refKey(r)))) return;
+  await update($, seen, (now) => {
+    const keys = [...new Set(refs.map(refKey))].filter((k) => !now.includes(k));
+    return keys.length ? [...now, ...keys].slice(-100) : now;
+  });
 }
 
 async function rootOf($: EngineInterface, setting: string): Promise<string> {
@@ -572,14 +624,17 @@ async function withProof(
   engineRow: () => Promise<RenderElement>,
   refs: Ref[],
   settings: { root: string; preview: string },
+  ownRefs: Ref[] = [],
 ): Promise<RenderElement> {
   if (refs.length === 0) return engineRow();
-  const root = await rootOf($, settings.root);
   const instance = `${e.component}:${e.requestId}`;
+  // Before any wait, so the rows take their places in the order they draw.
+  placeOf(instance);
+  const root = await rootOf($, settings.root);
   let displaced = false;
   const records = await recordsIn($, root);
   const here = await repoHere($);
-  const named = resolveRefs(refs, records, here);
+  const named = resolveRefs(refs, await ownRecords($, records, here, ownRefs), here);
   // A record's proof is worth a button while its PR is open; a done PR's is history.
   const live = [];
   for (const r of named) {
@@ -634,21 +689,34 @@ export const register: Register = (on, options) => {
   const settings = { root: rootSetting, preview: previewSetting };
 
   // The records folder is a setting, so the agent writing records reads it
-  // from here rather than from the skill's default.
+  // from here rather than from the skill's default; the session's id marks
+  // the records it writes as its own.
   on("prompt.compose", async ($, e, next) => {
     const composed = await next(e);
     const root = await rootOf($, rootSetting);
+    const id = await $.session.id().catch(() => undefined);
     return {
       sections: [
         ...composed.sections,
         {
           id: "pr-proof:root",
-          text: `PR proof records (the pr-proof:record-proof skill) go in ${root}/<repo>/<pr>/: proof.json beside its screenshots and files.`,
+          text: `PR proof records (the pr-proof:record-proof skill) go in ${root}/<repo>/<pr>/: proof.json beside its screenshots and files${id ? `, its "session" set to "${id}"` : ""}.`,
           scope: "session" as const,
         },
       ],
     };
   });
+
+  // A PR the person names is theirs to see, whichever session wrote its record.
+  // No origin is the person's own prompt too.
+  on("prompt.submit", async ($, e, next) => {
+    const from = (e.origin as PromptOrigin | undefined)?.kind;
+    if (from === undefined || PERSON.has(from)) {
+      const refs = findRefs(e.text);
+      if (refs.length > 0) await addSeen($, refs).catch(() => undefined);
+    }
+    return next(e);
+  }).catch(($, e, next) => next(e));
 
   on("session.start", async ($, e, next) => {
     await $.command.register({
@@ -673,8 +741,7 @@ export const register: Register = (on, options) => {
     if (records.length === 0)
       return { text: `No records under ${root}. Each one is <root>/<repo>/<pr>/proof.json.` };
     const line = (r: ProofRecord) => `${labelOf(r)}  ${countsOf(r)}${r.title ? `  ${r.title}` : ""}`;
-    const refs = (await read($, seen)).map(parseRefKey).filter((r): r is Ref => !!r);
-    const mine = resolveRefs(refs, records, await repoHere($));
+    const mine = await ownRecords($, records, await repoHere($));
     const rest = records.filter((r) => !mine.includes(r));
     if (mine.length === 0)
       return { text: ["None from this session yet.", "", "Other sessions:", ...rest.map(line)].join("\n") };
@@ -693,23 +760,29 @@ export const register: Register = (on, options) => {
 
   // Claude Code's own line for a `gh pr` call, "Created PR #549" or "Edited
   // PR #549", is a ToolUse row, or a ToolGroup when it folded the call with
-  // others: the PR is in the URL the command printed.
-  on("ui.render", { component: "ToolUse" }, async ($, e, next) =>
-    withProof($, e, () => next(e), findUrlRefs(ghPrText(e.props.tool, e.props.input, e.props.output)), settings),
-  );
-
-  on("ui.render", { component: "ToolGroup" }, async ($, e, next) =>
-    withProof(
+  // others: the PR is in the URL the command printed. A create or an edit is
+  // this session's own work on the PR, after a resume too.
+  on("ui.render", { component: "ToolUse" }, async ($, e, next) => {
+    const { tool, input, output } = e.props;
+    return withProof(
       $,
       e,
       () => next(e),
-      findUrlRefs(e.props.calls.map((c) => ghPrText(c.tool, c.input, c.output)).join("\n")),
+      findUrlRefs(ghPrText(tool, input, output)),
       settings,
-    ),
-  );
+      findUrlRefs(ghPrText(tool, input, output, GH_PR_CHANGE)),
+    );
+  });
 
-  // What this session touched: a PR a command printed, a record a tool wrote or
-  // named by its path. /proof lists these first.
+  on("ui.render", { component: "ToolGroup" }, async ($, e, next) => {
+    const printed = (verb?: RegExp) =>
+      findUrlRefs(e.props.calls.map((c) => ghPrText(c.tool, c.input, c.output, verb)).join("\n"));
+    return withProof($, e, () => next(e), printed(), settings, printed(GH_PR_CHANGE));
+  });
+
+  // What this session touched: a PR it opened or changed with `gh pr`, a record
+  // a tool wrote or named by its path. Replies draw these, and /proof lists
+  // them first.
   on("tool.call", async ($, e, next) => {
     const ran = await next(e);
     try {
@@ -723,13 +796,14 @@ export const register: Register = (on, options) => {
         .filter((v): v is string => typeof v === "string")
         .join("\n");
       const output = ran.deny === undefined ? outputText(e.tool, ran.result) : "";
-      const refs = [...findRecordPaths(input, root, home), ...findUrlRefs(output)];
-      if (refs.length > 0) {
-        await update($, seen, (list) => {
-          const keys = refs.map(refKey).filter((k) => !list.includes(k));
-          return keys.length ? [...list, ...keys].slice(-100) : list;
-        });
-      }
+      const paths = findRecordPaths(input, root, home);
+      // A record just written or moved into place is read on the next drawing,
+      // not up to INDEX_TTL_MS later.
+      if (paths.length > 0) index = undefined;
+      // `gh pr view` prints a PR's URL too: looking at a PR does not make it this session's.
+      const changed = ran.deny === undefined ? findUrlRefs(ghPrText(e.tool, e, ran.result, GH_PR_CHANGE)) : [];
+      const refs = [...paths, ...changed];
+      if (refs.length > 0) await addSeen($, refs);
       // A merge just happened: every cached state may be stale, and the rows
       // under a PR that is now merged draw again without their button.
       if (/\bgh\s+pr\s+merge\b/.test(input) && ran.deny === undefined) {

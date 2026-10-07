@@ -99,10 +99,26 @@ const answer = (exitCode: number, stdout: string) => ({
   value: { exitCode, stdout, stderr: "", isStdoutTruncated: false, isStderrTruncated: false },
 });
 
+const SESSION = "this-session";
+
+/** Whose the records on disk are: this session's, another session's, or no session's (written before records said). */
+type Owner = "this" | "other" | "none";
+
 /** Records on disk, the host's processes and toasts, all answered from memory. */
-function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux", merged = new Set<string>()) {
+function stage(
+  $: Engine,
+  on: On,
+  env: Record<string, string>,
+  uname = "Linux",
+  merged = new Set<string>(),
+  owner: Owner = "this",
+) {
+  const session = { this: SESSION, other: "another-session", none: undefined }[owner];
+  on("session.id", () => ({ value: SESSION }));
   mock.env(on, { HOME: "/home/me", ...env });
-  mock.clock(on);
+  const clock = mock.clock(on);
+  /** Record folders not written yet, as `<repo>/<pr>`. */
+  const missing = new Set<string>();
   const ran: string[][] = [];
   const toasts: string[] = [];
   const entry = (name: string) => ({ name, kind: "dir" as const, size: 0, mtimeMs: 0, isLink: false });
@@ -110,7 +126,7 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux", 
     if (e.path === ROOT) return { value: [entry("shop-web"), entry("a&calc"), entry("api")] };
     if (e.path === `${ROOT}/api`) return { value: [entry("12")] };
     if (e.path === `${ROOT}/a&calc`) return { value: [entry("541")] };
-    if (e.path === `${ROOT}/shop-web`) return { value: [entry("541")] };
+    if (e.path === `${ROOT}/shop-web`) return { value: missing.has("shop-web/541") ? [entry("feat-x")] : [entry("541")] };
     return { value: [] };
   });
   on("fs.read", (_$, e) => {
@@ -125,8 +141,8 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux", 
         },
       };
     if (e.path === `${ROOT}/api/12/proof.json`)
-      return { value: JSON.stringify({ repo: "acme/api", title: "Rate limits", checks: [{ claim: "c", result: "pass" }] }) };
-    return { value: e.path.endsWith("/541/proof.json") ? JSON.stringify(RECORD) : "" };
+      return { value: JSON.stringify({ repo: "acme/api", session, title: "Rate limits", checks: [{ claim: "c", result: "pass" }] }) };
+    return { value: e.path.endsWith("/541/proof.json") ? JSON.stringify({ ...RECORD, session }) : "" };
   });
   on("fs.stat", (_$, e) => ({
     value: {
@@ -161,7 +177,7 @@ function stage($: Engine, on: On, env: Record<string, string>, uname = "Linux", 
     const { Text } = $.ui.resolve(e);
     return <Text>engine row</Text>;
   });
-  return { ran, toasts };
+  return { ran, toasts, clock, missing };
 }
 
 const reply = ($: Engine, text: string, surface: "terminal" | "desktop" = "terminal") =>
@@ -394,7 +410,7 @@ const listProof = ($: Engine) =>
   });
 
 test("/proof lists this session's PRs first: one it created, one whose record it wrote", async ($, on) => {
-  stage($, on, {});
+  stage($, on, {}, "Linux", new Set(), "none");
   on("tool.call", (_$, e) =>
     e.tool === "Bash" && /gh pr create/.test(String((e as { command?: unknown }).command))
       ? { result: { stdout: `${PR_URL}\n`, stderr: "" } }
@@ -561,3 +577,77 @@ test("a reply naming five PRs draws a ▸ Proof button for each one with a recor
   expect(toggle?.props.label).toBe("▸ Proof");
 });
 
+
+test("a passing mention of another session's PR draws none of its proof", async ($, on) => {
+  stage($, on, {}, "Linux", new Set(), "other");
+  const ui = await reply($, "The other session finished testing #541, so the tablet is free (web#541).");
+  expect(await ui.find({ type: "Text", text: "engine row" })).toBeDefined();
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+  // Nor does a gh pr view of it: looking at a PR does not make it this session's.
+  const viewed = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: "tu-view",
+    props: { ...created("tu-view"), input: { command: "gh pr view 541" } },
+  });
+  expect(await viewed.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+});
+
+test("another session's record draws once the person names its PR", async ($, on) => {
+  stage($, on, {}, "Linux", new Set(), "other");
+  on("prompt.submit", (_$, e) => ({ text: e.text }));
+  await $.prompt.submit({ text: "Is web#541 ready?", wait: false, origin: { kind: "composer" } });
+  const ui = await reply($, "web#541 is ready for review.");
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+});
+
+test("a record that names no session draws once this session works in its folder, not when it views the PR", async ($, on) => {
+  stage($, on, {}, "Linux", new Set(), "none");
+  on("tool.call", () => ({ result: { stdout: `${PR_URL}\n`, stderr: "" } }));
+  await $.tool.call({ tool: "Bash", command: "gh pr view 541" });
+  const ui = await reply($, "web#541 is ready for review.");
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+  await $.tool.call({ tool: "Bash", command: "cp shot.png ~/pr-proof/shop-web/541/" });
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+});
+
+test("the system prompt gives the session's id for the records it writes", async ($, on) => {
+  mock.env(on, { HOME: "/home/me" });
+  on("session.id", () => ({ value: SESSION }));
+  on("prompt.compose", () => ({ sections: [] }));
+  const { sections } = await $.prompt.compose({
+    model: "m",
+    promptModel: "m",
+    surfaces: ["terminal"],
+    tools: [],
+    outputStyle: null,
+    traits: [],
+  });
+  expect(sections.at(-1)?.text).toMatch(/"session" set to "this-session"/);
+});
+
+test("a Created PR row drawn again once its record lands leaves the button under the newer reply", async ($, on) => {
+  const { missing } = stage($, on, {});
+  on("tool.call", () => ({ result: { stdout: "", stderr: "" } }));
+  // The PR is opened before its record has a number to live under.
+  missing.add("shop-web/541");
+  const row = await $.ui.mount({
+    plugin: "pr-proof",
+    surface: "terminal",
+    component: "ToolUse",
+    requestId: "tu-early",
+    props: created("tu-early"),
+  });
+  expect(await row.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+  missing.delete("shop-web/541");
+  await $.tool.call({ tool: "Bash", command: "mv ~/pr-proof/shop-web/feat-x ~/pr-proof/shop-web/541" });
+  const ui = await reply($, "web#541 is ready for review.");
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  // The older row drawn again (at a scroll's edge) finds the record, and keeps out of the way.
+  await row.redraw();
+  expect(await row.find({ key: "pp-shop-web-541-toggle" })).toBe(undefined);
+  expect(await ui.find({ key: "pp-shop-web-541-toggle" })).toBeDefined();
+  await ui.press({ key: "pp-shop-web-541-toggle" });
+  expect(await ui.find({ key: "pp-shop-web-541-details" })).toBeDefined();
+});
