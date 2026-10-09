@@ -17,7 +17,9 @@ services after it, so they are skipped and the next `/dev-up` starts them.
 Running it again is both the health check and the way to finish.
 
 Servers start detached (`setsid`), with a log and a pid file under
-`~/.cache/dev-up/<stack>/`. They outlive the turn, the Claude session and a
+`~/.cache/dev-up/<stack>/`. The pid file also records which boot of the machine
+wrote it, so after a reboot a server reads as down rather than crashed, and
+`stop` never signals a pid that now belongs to some other process. They outlive the turn, the Claude session and a
 reload of the mod, and every session in the stack's folder sees the same ones.
 The stack's state shows at the end of the hint line under the prompt, after
 `dev`, one colored dot per service: green up, yellow starting, red broken, dim down. A
@@ -105,8 +107,10 @@ Each service has exactly one of `compose`, `run`, `task` or `check`.
 
 - **compose**: `docker compose up -d` in that folder. It is up when every
   container in `ready.healthy` reports healthy and every one in `ready.up` is
-  running. A container left `Exited (127)` after Docker Desktop restarts on WSL
-  gets a WARN with the `--force-recreate` fix.
+  running. When Docker Desktop on WSL restarts, a container with a bind mount
+  (or a compose `configs:` file) can be left `Exited (127)`, unable to start
+  because the mount is gone. The pass sees that in `docker inspect` and
+  recreates that container alone. Any other `Exited (127)` gets a WARN.
 - **run**: a server. It is up when `port` listens, or while its process lives
   if it has no port. A folder with `package.json` gets a WARN and is not started
   when it has no `node_modules`, or when its `package-lock.json` is newer than
@@ -119,7 +123,7 @@ Each service has exactly one of `compose`, `run`, `task` or `check`.
   The worst prefix it printed sets the service's state. The script runs on
   every pass once what it waits for is up, since it is its own health check.
   Its last result is saved in `~/.cache/dev-up/<stack>/<service>.check`, so a
-  reload and every other session see it. Between passes the refresh never runs
+  reload and every other session see it, until the machine restarts. Between passes the refresh never runs
   the script, because it may act. If you give it a `probe:`, a read-only
   command whose exit 0 means up, the refresh runs that instead, from the root.
 

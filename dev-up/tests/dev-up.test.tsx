@@ -160,6 +160,9 @@ test("the status line", () => {
   expect(statusLine(stack(), seen({ codegen: "up" }))).toMatch(/✓ codegen/);
 });
 
+const LOST_MOUNT =
+  "failed to create task for container: OCI runtime create failed: runc create failed: unable to start container process: error during container init: failed to fulfil mount request: open /run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/f8c1: no such file or directory";
+
 test("docker compose ps: healthy, still starting, stale after a Docker restart, down", () => {
   const db = stack().services[0]!;
   const row = (Service: string, State: string, Health = "", Status = "Up 2 minutes") =>
@@ -175,6 +178,30 @@ test("docker compose ps: healthy, still starting, stale after a Docker restart, 
   });
   expect(composeState(db, row("postgres", "running", "healthy")).state).toBe("down");
   expect(composeState(db, "").state).toBe("down");
+});
+
+test("a container that lost its bind mount is recreated; any other exit 127 is left to a person", () => {
+  const db = stack().services[0]!;
+  const ps = [
+    JSON.stringify({ ID: "a1", Service: "postgres", State: "running", Health: "healthy", Status: "Up" }),
+    JSON.stringify({ ID: "b2", Service: "mail", State: "exited", Health: "", Status: "Exited (127) 26 minutes ago" }),
+  ].join("\n");
+
+  const lost = composeState(db, ps, { mail: LOST_MOUNT });
+  expect(lost).toEqual({ state: "down", why: "mail lost a bind mount when Docker restarted", recreate: ["mail"] });
+  const steps = plan(stack(), { db: lost });
+  expect(steps[0]).toEqual({
+    service: "db",
+    prefix: "STARTED",
+    text: "db: docker compose up -d --no-deps --force-recreate mail  (mail lost a bind mount when Docker restarted)",
+    action: "recreate",
+    command: ["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "mail"],
+  });
+  expect(steps[1]?.text).toBe("web: waits for db; next run");
+
+  const notFound = composeState(db, ps, { mail: 'exec: "mailhog": executable file not found in $PATH' });
+  expect(notFound).toEqual({ state: "broken", why: 'mail is Exited (127): exec: "mailhog": executable file not found in $PATH' });
+  expect(plan(stack(), { db: notFound })[0]?.prefix).toBe("WARN");
 });
 
 test("a check script's lines", () => {
@@ -203,6 +230,12 @@ function stage(
     mtimes?: Record<string, number>;
     /** Whether the check service's probe passes. */
     probe?: boolean;
+    /** What `docker inspect` prints: `<service>\t<State.Error>` per line. */
+    inspect?: string;
+    /** This boot's id, as the probe prints it. */
+    boot?: string;
+    /** Files already on disk with their text, e.g. a check result from an earlier pass. */
+    texts?: Record<string, string>;
     /** Per folder git is run in: its top folder and the worktrees `git worktree list` gives. */
     git?: Record<string, [string, string[]]>;
   },
@@ -211,7 +244,7 @@ function stage(
   mock.clock(on);
   const ran: { argv: string[]; cwd?: string }[] = [];
   const files = new Set([`${STACKS}/shop.yml`, ...(machine.files ?? [])]);
-  const written = new Map<string, string>();
+  const written = new Map<string, string>(Object.entries(machine.texts ?? {}));
   const gitIn: string[] = [];
   on("session.cwd", () => ({ value: machine.cwd ?? `${ROOT}/web` }));
   on("fs.list", (_$, e) =>
@@ -235,8 +268,12 @@ function stage(
     ran.push({ argv: [...e.argv], cwd: e.init?.cwd });
     const [cmd, a, b] = e.argv;
     if (cmd === "docker" && a === "compose" && b === "ps") return answer(0, machine.compose);
-    if (cmd === "sh" && e.argv[2]?.includes("PORT"))
-      return answer(0, [...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
+    if (cmd === "docker" && a === "inspect") return answer(0, machine.inspect ?? "");
+    if (cmd === "sh" && e.argv[2]?.includes("PORT")) {
+      const boot = machine.boot ? [`BOOT ${machine.boot}`] : [];
+      return answer(0, [...boot, ...(machine.ports ?? []).map((p) => `PORT ${p}`), ...(machine.pids ?? [])].join("\n"));
+    }
+    if (cmd === "sh" && e.argv[2]?.includes("boot_id")) return answer(0, machine.boot ? `${machine.boot}\n` : "");
     if (cmd === "curl") return answer(0, "200");
     if (cmd === "tail") return answer(e.argv[3]!.endsWith("web.log") ? 0 : 1, "\u001b[32mready\u001b[39m on :3000\r\nGET / 200\n");
     if (cmd === "docker" && e.argv[2] === "logs") return answer(0, "postgres-1  | database system is ready\n");
@@ -311,6 +348,42 @@ test("with the server answering, the next pass runs the task and the check scrip
   expect(out.text).toMatch(/^UP {6}worker: running/m);
   expect(out.text).toMatch(/^UP {6}seed: seeded\n {8}rows 12/m);
   expect(ran.find((r) => r.argv[0] === `${STACKS}/shop/seed.sh`)?.cwd).toBe(ROOT);
+});
+
+test("after a Docker restart, a pass recreates the container that lost its bind mount, and only that one", async ($, on) => {
+  const compose = [
+    JSON.stringify({ ID: "a1", Service: "postgres", State: "running", Health: "healthy", Status: "Up 26 minutes (healthy)" }),
+    JSON.stringify({ ID: "b2", Service: "mail", State: "exited", Health: "", Status: "Exited (127) 26 minutes ago" }),
+  ].join("\n");
+  const { ran } = stage(on, { compose, inspect: `mail\t${LOST_MOUNT}\n`, files: [`${ROOT}/web/node_modules`] });
+  const out = await devUp($);
+  expect(ran.find((r) => r.argv[1] === "inspect")?.argv.slice(-1)).toEqual(["b2"]);
+  const recreate = ran.find((r) => r.argv.includes("--force-recreate"));
+  expect(recreate?.argv).toEqual(["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "mail"]);
+  expect(recreate?.cwd).toBe(ROOT);
+  expect(out.text).toMatch(/^STARTED db: docker compose up -d --no-deps --force-recreate mail {2}\(mail lost a bind mount when Docker restarted\)$/m);
+  expect(out.text).toMatch(/^SKIP {4}web: waits for db; next run/m);
+  expect(out.text).not.toMatch(/^WARN/m);
+});
+
+test("after a reboot, a pid file or check result from the last boot reads as down, not crashed or starting", async ($, on) => {
+  const check = `${HOME}/.cache/dev-up/shop/seed.check`;
+  const { ran } = stage(on, {
+    compose: HEALTHY,
+    boot: "new-boot",
+    pids: ["PID web stale", "PID worker stale"],
+    files: [`${ROOT}/web/node_modules`],
+    texts: { [check]: JSON.stringify({ state: "starting", boot: "old-boot", lines: ["STARTED emulator"] }) },
+  });
+  const status = await devUp($, "status");
+  expect(status.text).toMatch(/^down {5}web$/m);
+  expect(status.text).toMatch(/^down {5}seed$/m);
+
+  const out = await devUp($);
+  expect(out.text).not.toMatch(/^WARN/m);
+  expect(out.text).toMatch(/^STARTED web: pnpm dev/m);
+  expect(out.text).not.toMatch(/Notes for this stack/);
+  expect(ran.filter((r) => r.argv[2]?.includes("setsid")).length).toBe(2);
 });
 
 test("--dry-run says what it would do and starts nothing", async ($, on) => {
