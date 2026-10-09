@@ -5,7 +5,9 @@ import type { Cell, Dots, Panel } from "../types";
 
 import {
   applyOverrides,
+  composeRows,
   composeState,
+  exited127,
   formatStep,
   parseLine,
   parseStack,
@@ -29,14 +31,28 @@ import {
 const REFRESH_MS = 30_000;
 const TOOL = "dev_up";
 
-/** Prints `PORT <n>` per listening TCP port and `PID <service> alive|dead` per pid file (its process group). */
+/**
+ * The machine's boot id (Linux, macOS): a pid written under another boot names
+ * some other process, or none. Clock times can't say it: a WSL guest's boot
+ * time moves when its clock is corrected after the host sleeps.
+ */
+const BOOT_ID = String.raw`boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null)`;
+
+/**
+ * Prints `BOOT <id>`, `PORT <n>` per listening TCP port, and `PID <service>
+ * alive|dead|stale` per pid file: its process group, or stale when the file is
+ * from before the machine last started.
+ */
 const PROBE = String.raw`
 dir="$1"
+${BOOT_ID}
+[ -n "$boot" ] && echo "BOOT $boot"
 if command -v ss >/dev/null 2>&1; then ss -ltnH 2>/dev/null | awk '{print $4}'
 else lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $9}'; fi | sed -n 's/.*:\([0-9][0-9]*\)$/PORT \1/p' | sort -u
 for f in "$dir"/*.pid; do
   [ -e "$f" ] || continue
-  n=$(basename "$f" .pid); p=$(cat "$f")
+  n=$(basename "$f" .pid); p=$(sed -n 1p "$f"); b=$(sed -n 2p "$f")
+  if [ -n "$b" ] && [ "$b" != "$boot" ]; then echo "PID $n stale"; continue; fi
   # The group, not only its first process: a watcher outlives the shell it started from.
   if [ -n "$p" ] && { kill -0 "-$p" 2>/dev/null || kill -0 "$p" 2>/dev/null; }; then echo "PID $n alive"; else echo "PID $n dead"; fi
 done
@@ -57,7 +73,9 @@ if command -v setsid >/dev/null 2>&1; then
 else
   nohup sh -c "$cmd" >> "$log" 2>&1 < /dev/null &
 fi
-echo $! > "$pidf"
+p=$!
+${BOOT_ID}
+printf '%s\n%s\n' "$p" "$boot" > "$pidf"
 `;
 
 /**
@@ -68,7 +86,10 @@ echo $! > "$pidf"
  */
 const STOP = String.raw`
 pidf="$1"; port="$2"; log="$3"
-p=""; [ -f "$pidf" ] && p=$(cat "$pidf")
+p=""; [ -f "$pidf" ] && p=$(sed -n 1p "$pidf")
+# A pid from another boot is some other process now: only the port is stopped.
+${BOOT_ID}
+[ -f "$pidf" ] && [ -n "$(sed -n 2p "$pidf")" ] && [ "$(sed -n 2p "$pidf")" != "$boot" ] && p=""
 holders() {
   [ -n "$port" ] || return 0
   if command -v ss >/dev/null 2>&1; then ss -ltnpH "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2
@@ -205,10 +226,21 @@ const GLYPH = { up: "●", starting: "◐", down: "○", broken: "✕" } as cons
 
 const checkFile = (home: string, stack: Stack, s: Service) => `${stateDir(home, stack)}/${s.name}.check`;
 
-/** What a check script last said, kept on disk so a reload and every other session see it too. */
-async function savedCheck($: EngineInterface, home: string, stack: Stack, s: Service): Promise<Seen | undefined> {
+/** This boot's id, or undefined where the machine gives none. */
+async function bootId($: EngineInterface): Promise<string | undefined> {
+  const r = await run($, ["sh", "-c", `${BOOT_ID}\necho "$boot"`], { timeoutMs: 5_000 });
+  return r.stdout.trim() || undefined;
+}
+
+/**
+ * What a check script last said, kept on disk so a reload and every other
+ * session see it too. One said before the machine last started is no answer.
+ */
+async function savedCheck($: EngineInterface, home: string, stack: Stack, s: Service, boot?: string): Promise<Seen | undefined> {
   try {
-    const saved = JSON.parse(await $.fs.read(checkFile(home, stack, s))) as Seen;
+    const saved = JSON.parse(await $.fs.read(checkFile(home, stack, s))) as Seen & { boot?: string };
+    if (boot && saved.boot && saved.boot !== boot) return undefined;
+    delete saved.boot;
     return ["up", "starting", "down", "broken"].includes(saved.state) ? saved : undefined;
   } catch {
     return undefined;
@@ -219,11 +251,14 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
   const home = await homeOf($);
   const probe = await run($, ["sh", "-c", PROBE, "sh", stateDir(home, stack)], { timeoutMs: 10_000 });
   const ports = new Set<number>();
+  // A pid file from before a reboot (stale) says nothing: that service is simply down.
   const pids = new Map<string, boolean>();
+  let boot: string | undefined;
   for (const line of probe.stdout.split("\n")) {
     const [kind, a, b] = line.trim().split(/\s+/);
     if (kind === "PORT") ports.add(Number(a));
-    if (kind === "PID" && a) pids.set(a, b === "alive");
+    if (kind === "PID" && a && b !== "stale") pids.set(a, b === "alive");
+    if (kind === "BOOT" && a) boot = a;
   }
 
   const seen: Observed = {};
@@ -243,14 +278,14 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
           };
         else {
           try {
-            entry = composeState(s, ps.stdout);
+            entry = composeState(s, ps.stdout, await exitErrors($, s, ps.stdout));
           } catch {
             entry = { state: "broken", why: "could not read docker compose ps" };
           }
         }
       } else if (s.kind === "check") {
         // Between passes: the probe, if the stack gives one, beside what the script last said.
-        const saved = await savedCheck($, home, stack, s);
+        const saved = await savedCheck($, home, stack, s, boot);
         if (!s.probe) entry = saved ?? { state: "down" };
         else {
           const ok = (await run($, ["sh", "-c", s.probe], { cwd: stack.root, timeoutMs: 10_000 })).exitCode === 0;
@@ -275,6 +310,22 @@ async function observe($: EngineInterface, stack: Stack): Promise<Observed> {
     }),
   );
   return seen;
+}
+
+/** Why each container that exited 127 did, from Docker: `.State.Error` by compose service. */
+async function exitErrors($: EngineInterface, s: Service, psJson: string): Promise<Record<string, string>> {
+  const ids = exited127(composeRows(psJson))
+    .map((r) => r.ID)
+    .filter((id): id is string => !!id);
+  if (!ids.length) return {};
+  const format = '{{index .Config.Labels "com.docker.compose.service"}}{{"\\t"}}{{.State.Error}}';
+  const r = await run($, ["docker", "inspect", "--format", format, ...ids], { cwd: s.dir, timeoutMs: 20_000 });
+  const errors: Record<string, string> = {};
+  for (const line of r.stdout.split("\n")) {
+    const [service, ...error] = line.split("\t");
+    if (service && error.join("\t").trim()) errors[service] = error.join("\t").trim();
+  }
+  return errors;
 }
 
 /** One shell word, quoted so the shell reads it as text and runs nothing in it. */
@@ -331,7 +382,8 @@ async function runCheck($: EngineInterface, stack: Stack, s: Service, dryRun: bo
   }
   const seen: Seen = { state: stateOfLines(prefixes) };
   // The lines too, for the panel: a check script keeps no log of its own.
-  const saved = { ...seen, lines: r.stdout.split("\n").filter((l) => l.trim()).slice(-PANEL_LINES) };
+  const boot = await bootId($);
+  const saved = { ...seen, ...(boot ? { boot } : {}), lines: r.stdout.split("\n").filter((l) => l.trim()).slice(-PANEL_LINES) };
   if (!dryRun) await $.fs.write(checkFile(await homeOf($), stack, s), `${JSON.stringify(saved)}\n`).catch(() => {});
   return { lines, seen };
 }
@@ -365,14 +417,11 @@ async function pass($: EngineInterface, stack: Stack, dryRun: boolean): Promise<
       continue;
     }
     if (dryRun) {
-      const what = step.action === "compose" ? `docker compose up -d  (in ${s.dir})` : `${step.text.slice(s.name.length + 2)}  (in ${s.dir})`;
-      lines.push(formatStep({ prefix: "ACTION", text: `${s.name}: ${what}` }));
+      const what = step.command ? step.command.join(" ") : step.text.slice(s.name.length + 2);
+      lines.push(formatStep({ prefix: "ACTION", text: `${s.name}: ${what}  (in ${s.dir})` }));
       continue;
     }
-    const r =
-      step.action === "compose"
-        ? await run($, ["docker", "compose", "up", "-d"], { cwd: s.dir, timeoutMs: 300_000 })
-        : await start($, stack, s);
+    const r = step.command ? await run($, step.command, { cwd: s.dir, timeoutMs: 300_000 }) : await start($, stack, s);
     if (r.exitCode === 0) {
       const where = step.action === "start" ? `  (log ${logOf(home, stack, s)})` : "";
       lines.push(formatStep({ prefix: "STARTED", text: `${step.text}${where}` }));

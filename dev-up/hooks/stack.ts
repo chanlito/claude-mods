@@ -173,13 +173,17 @@ export function pickStack(stacks: Stack[], cwd: string): Stack | undefined {
 }
 
 export type State = "down" | "starting" | "up" | "broken";
-/** `needsInstall` says why the folder needs an install before it can start. */
-export type Seen = { state: State; why?: string; needsInstall?: string };
+/**
+ * `needsInstall` says why the folder needs an install before it can start;
+ * `recreate`, which compose containers lost a bind mount and need recreating.
+ */
+export type Seen = { state: State; why?: string; needsInstall?: string; recreate?: string[] };
 export type Observed = Record<string, Seen>;
 
 export type Prefix = "UP" | "STARTED" | "SKIP" | "WARN" | "STOP" | "ACTION";
-export type Action = "compose" | "start" | "check";
-export type Step = { service: string; prefix: Prefix; text: string; action?: Action };
+export type Action = "compose" | "recreate" | "start" | "check";
+/** `command` is what a compose or recreate step runs, in the service's folder. */
+export type Step = { service: string; prefix: Prefix; text: string; action?: Action; command?: string[] };
 
 /**
  * One pass: report what is up, start what is down, skip what waits for
@@ -190,9 +194,9 @@ export function plan(stack: Stack, seen: Observed): Step[] {
   const steps: Step[] = [];
   const isUp = (name: string) => seen[name]?.state === "up";
   for (const s of stack.services) {
-    const { state, why, needsInstall } = seen[s.name] ?? { state: "down" as const };
-    const say = (prefix: Prefix, text: string, action?: Action) =>
-      steps.push({ service: s.name, prefix, text: `${s.name}: ${text}`, ...(action ? { action } : {}) });
+    const { state, why, needsInstall, recreate } = seen[s.name] ?? { state: "down" as const };
+    const say = (prefix: Prefix, text: string, action?: Action, command?: string[]) =>
+      steps.push({ service: s.name, prefix, text: `${s.name}: ${text}`, ...(action ? { action } : {}), ...(command ? { command } : {}) });
 
     if (s.kind === "check") {
       // The script is its own health check: it runs on every pass once what it waits for is up.
@@ -202,10 +206,14 @@ export function plan(stack: Stack, seen: Observed): Step[] {
       continue;
     }
     if (s.kind === "compose") {
-      if (state === "up") say("UP", why ?? "containers up");
+      if (recreate?.length) {
+        // --no-deps: recreating a healthy dependency would only make it start over.
+        const command = ["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", ...recreate];
+        say("STARTED", `${command.join(" ")}  (${why})`, "recreate", command);
+      } else if (state === "up") say("UP", why ?? "containers up");
       else if (state === "starting") say("SKIP", `${why ?? "not healthy yet"}; what waits for it starts next run`);
       else if (state === "broken") say("WARN", why ?? "a container needs a hand");
-      else say("STARTED", "docker compose up -d", "compose");
+      else say("STARTED", "docker compose up -d", "compose", ["docker", "compose", "up", "-d"]);
       continue;
     }
     if (state === "up") {
@@ -291,20 +299,50 @@ export function stateOfLines(prefixes: Prefix[]): State {
   return prefixes.length ? "up" : "down";
 }
 
-/** A compose project's state from `docker compose ps -a --format json`. */
-export function composeState(s: Service, psJson: string): Seen {
-  const rows: { Service?: string; State?: string; Health?: string; Status?: string }[] = [];
+type PsRow = { ID?: string; Service?: string; State?: string; Health?: string; Status?: string };
+
+/** The rows of `docker compose ps -a --format json`: one JSON array, or one object per line. */
+export function composeRows(psJson: string): PsRow[] {
   const trimmed = psJson.trim();
-  if (trimmed.startsWith("[")) rows.push(...JSON.parse(trimmed));
-  else for (const line of trimmed.split("\n")) if (line.trim()) rows.push(JSON.parse(line));
+  if (trimmed.startsWith("[")) return JSON.parse(trimmed);
+  return trimmed
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
+}
+
+/** The containers that exited 127: Docker could not start them, or their command was not found. */
+export const exited127 = (rows: PsRow[]) => rows.filter((r) => /Exited \(127\)/.test(r.Status ?? ""));
+
+/**
+ * Docker Desktop on WSL drops its bind-mount handles when it restarts. A
+ * container that had one (a bind mount, a compose `configs:` file) then fails
+ * to start with this, and only recreating it gives it a new handle.
+ */
+const LOST_MOUNT = /failed to fulfil mount request|docker-desktop-bind-mounts/;
+
+/**
+ * A compose project's state from `docker compose ps -a --format json`.
+ * `errors` is each 127 container's `.State.Error` from `docker inspect`, by
+ * service: the error says whether a lost bind mount is why it exited.
+ */
+export function composeState(s: Service, psJson: string, errors: Record<string, string> = {}): Seen {
+  const rows = composeRows(psJson);
   if (rows.length === 0) return { state: "down", why: "no containers" };
 
-  const stale = rows.find((r) => /Exited \(127\)/.test(r.Status ?? ""));
-  if (stale)
+  const dead = exited127(rows);
+  const lost = dead.filter((r) => LOST_MOUNT.test(errors[r.Service ?? ""] ?? "")).map((r) => r.Service ?? "");
+  const other = dead.filter((r) => !lost.includes(r.Service ?? ""));
+  if (other.length) {
+    const name = other[0]!.Service;
     return {
       state: "broken",
-      why: `${stale.Service} is Exited (127), a stale bind mount after Docker restarted: docker compose up -d --force-recreate ${stale.Service}`,
+      why: errors[name ?? ""]
+        ? `${name} is Exited (127): ${errors[name ?? ""]}`
+        : `${name} is Exited (127), maybe a stale bind mount after Docker restarted: docker compose up -d --force-recreate ${name}`,
     };
+  }
+  if (lost.length) return { state: "down", why: `${lost.join(", ")} lost a bind mount when Docker restarted`, recreate: lost };
 
   const byName = new Map(rows.map((r) => [r.Service ?? "", r]));
   const want = s.healthy.length || s.running.length ? [...s.healthy, ...s.running] : [...byName.keys()];

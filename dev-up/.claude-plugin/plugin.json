@@ -1,6 +1,6 @@
 {
   "name": "dev-up",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Brings up a folder's dev stack from a YAML stack file: docker compose, detached dev servers, one-off tasks and check scripts, one pass at a time, with each service as a colored dot under the prompt",
   "author": {
     "name": "Chanlito Hem"
